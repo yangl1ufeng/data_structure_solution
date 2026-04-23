@@ -41,6 +41,8 @@ if "current_stage" not in st.session_state:
     st.session_state.current_stage = "setup"  # setup, processing, visualization
 if "auto_simulation_running" not in st.session_state:
     st.session_state.auto_simulation_running = False
+if "num_vehicles" not in st.session_state:         # <--- 新增状态
+    st.session_state.num_vehicles = 3
 
 class SimulationVisualizer:
     """仿真结果可视化器"""
@@ -365,15 +367,15 @@ class SimulationVisualizer:
             'num_log_entries': len(self.simulation_log)
         }
 
-def run_simulation_background(progress_container):
+def run_simulation_background(progress_container, num_vehicles=3):  # <--- 增加参数
     """在后台运行仿真"""
     try:
         progress_bar = progress_container.progress(0)
         status_text = progress_container.text("正在运行仿真...")
         
-        # 设置Python路径并运行仿真脚本
+        # 设置Python路径并运行仿真脚本，传入自定义车辆数
         result = subprocess.run(
-            [sys.executable, "simulation_gurobi.py"],
+            [sys.executable, "simulation_gurobi.py", "--num_vehicles", str(num_vehicles)], # <--- 传入参数
             capture_output=True,
             text=True,
             timeout=180  # 3分钟超时
@@ -587,6 +589,16 @@ def main():
         
         st.divider()
         
+        # --- 新增: 车辆参数设置区域 ---
+        st.subheader("⚙️ 仿真参数设置")
+        st.session_state.num_vehicles = st.number_input(
+            "设置参与调度的车辆数量", 
+            min_value=1, max_value=20, 
+            value=st.session_state.num_vehicles, 
+            step=1,
+            help="这决定了仿真中有多少辆车可用。大车队处理任务更快，但也更耗费计算资源。"
+        )
+        
         # 一键自动化按钮
         if st.button("🚀 一键自动化执行", type="primary", disabled=not data_ready, use_container_width=True):
             if data_ready and not st.session_state.auto_simulation_running:
@@ -602,7 +614,7 @@ def main():
                     
                     # 步骤2: 运行仿真
                     st.info("⚙️ 步骤2/3: 运行仿真引擎...")
-                    success, log_output = run_simulation_background(progress_container)
+                    success, log_output = run_simulation_background(progress_container, st.session_state.num_vehicles) # <--- 传入页面状态值
                     
                     if success:
                         # 步骤3: 解析日志
@@ -634,7 +646,7 @@ def main():
                 progress_container = st.empty()
                 
                 with st.spinner("运行仿真中..."):
-                    success, log_output = run_simulation_background(progress_container)
+                    success, log_output = run_simulation_background(progress_container, st.session_state.num_vehicles) # <--- 传入页面状态值
                     if success:
                         visualizer.parse_simulation_log(log_output)
                         st.success("✅ 仿真完成")

@@ -6,6 +6,7 @@ import random
 import math
 import pandas as pd
 import os
+import argparse  # <--- 新增引入 argparse
 
 # --- 引入 Gurobi 调度器 ---
 # 确保 scheduler_gurobi.py 在同一目录下
@@ -459,6 +460,11 @@ class Simulator:
 # --- 3. 仿真设置与运行示例 ---
 
 if __name__ == '__main__':
+    # --- 新增: 解析命令行参数 ---
+    parser = argparse.ArgumentParser(description="EVRP Simulation")
+    parser.add_argument('--num_vehicles', type=int, default=3, help='自定义车辆数量')
+    args = parser.parse_args()
+
     DATA_FOLDER = "data"
     SNAPPED_POINTS_FILE = os.path.join(DATA_FOLDER, "snapped_points.csv")
     DISTANCE_MATRIX_FILE = os.path.join(DATA_FOLDER, "distance_matrix.csv")
@@ -524,27 +530,22 @@ if __name__ == '__main__':
 
     task_point_info = snapped_points_df[snapped_points_df['type'].str.contains("Task Point")]
     
+    # === 动态车队配置 ===
+    NUM_VEHICLES = args.num_vehicles  # <--- 接收前端传来的参数
+    print(f"🚀 系统将使用 {NUM_VEHICLES} 辆车进行仿真调度...")
+    
     vehicle_configs = [
         {
-            "vehicle_id": 1, 
+            "vehicle_id": i + 1, 
             "depot_node": DEPOT_NODE, 
             "max_battery": 100,           
             "max_payload": 1000, 
             "charge_rate": 2,             
             "speed_kmh": 40,              
-            "consumption_rate_dist": 0.00025,    # <--- 在这里修改基础耗电率
-            "consumption_rate_payload": 0.0000001 # <--- 在这里修改与载重相关的额外耗电率
-        },
-        {
-            "vehicle_id": 2, 
-            "depot_node": DEPOT_NODE, 
-            "max_battery": 100, 
-            "max_payload": 1000, 
-            "charge_rate": 2, 
-            "speed_kmh": 40,
-            "consumption_rate_dist": 0.00025,    # <--- 同上
-            "consumption_rate_payload": 0.0000001 # <--- 同上
+            "consumption_rate_dist": 0.0025,       
+            "consumption_rate_payload": 0.0000005 
         }
+        for i in range(NUM_VEHICLES)
     ]
 
     simulator = Simulator(G, vehicle_configs, station_configs, [], dist_helper)
@@ -585,4 +586,4 @@ if __name__ == '__main__':
         print("警告: 未在 snapped_points.csv 中找到任务点，将不会生成任何任务。")
 
     # --- E. 运行仿真: 指定最大断路运行时长，而非绝对运行时间 ---
-    simulator.run(max_simulation_duration=1440) 
+    simulator.run(max_simulation_duration=1440)

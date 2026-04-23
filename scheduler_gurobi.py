@@ -122,8 +122,15 @@ class GurobiEVRPScheduler:
                     y[task.id, vehicle.id] = model.addVar(vtype=GRB.BINARY, 
                                                           name=f"y_{task.id}_{vehicle.id}")
             
+            # 放弃任务变量: drop[task_id] (用于防止模型在载重不足时陷入无解死锁)
+            drop = {}
+            for task in filtered_tasks:
+                drop[task.id] = model.addVar(vtype=GRB.BINARY, name=f"drop_{task.id}")
+            
             # 充电决策变量: z[vehicle_id, station_id]
             z = {}
+            # --- 新增: 充电量决策变量 (amount_to_charge) ---
+            charge_amount = {}
             charging_distance = {}
             charging_penalty = {}
             
@@ -133,23 +140,23 @@ class GurobiEVRPScheduler:
                     var_key = (vehicle.id, station.id)
                     z[var_key] = model.addVar(vtype=GRB.BINARY, 
                                             name=f"z_{vehicle.id}_{station.id}")
+                    # 连续变量：决定具体充多少电量
+                    charge_amount[var_key] = model.addVar(vtype=GRB.CONTINUOUS, lb=0.0,
+                                                        name=f"charge_amt_{vehicle.id}_{station.id}")
                     charging_distance[var_key] = charge_option['distance']
                     charging_penalty[var_key] = charge_option['penalty_cost']
 
             # === 约束条件 ===
-            # 1. 每个任务最多分配给一辆车
+            # 1. 强制完成约束 (Task Completion Guarantee)
+            # 要求任务必须被分配，除非模型判定绝对无法分配（借由极高惩罚的 drop 变量缓冲）
             for task in filtered_tasks:
                 model.addConstr(
-                    gp.quicksum(y[task.id, v.id] for v in vehicles) <= 1,
-                    name=f"task_assignment_{task.id}"
+                    gp.quicksum(y[task.id, v.id] for v in vehicles) + drop[task.id] == 1,
+                    name=f"must_assign_task_{task.id}"
                 )
 
-            # 2. 每辆车最多分配一个任务（简化版本）
-            for vehicle in vehicles:
-                model.addConstr(
-                    gp.quicksum(y[t.id, vehicle.id] for t in filtered_tasks) <= 1,
-                    name=f"vehicle_capacity_{vehicle.id}"
-                )
+            # 2. 【已解除限制】不再限制每辆车只能分配 1 个任务。
+            # 现在车辆允许多接任务，受下方的载重约束 (payload) 自动控制。
 
             # 3. 每辆车最多选择一个充电站
             for vehicle in vehicles:
@@ -166,8 +173,40 @@ class GurobiEVRPScheduler:
                 model.addConstr(total_weight <= vehicle.max_payload, 
                                name=f"payload_{vehicle.id}")
 
+            # --- 5. 修复: 前瞻性安全剩余电量约束 (Safe Battery Constraint 纳入预充电量) ---
+            for task in filtered_tasks:
+                # 寻找从任务点前往最近安全点(仓库)的距离作为兜底方案
+                dist_to_safe = dist_helper.get_distance(task.location_node, vehicle.depot_node) or 10000.0
+                
+                for vehicle in vehicles:
+                    origin = vehicle_origins[vehicle.id]
+                    dist_to_task = dist_helper.get_distance(origin, task.location_node) or 10000.0
+                    
+                    # 采用保守估计: 假设全程满载的最坏耗电率
+                    worst_consumption_rate = vehicle.consumption_rate_dist + (vehicle.max_payload * vehicle.consumption_rate_payload)
+                    required_energy_for_roundtrip = (dist_to_task + dist_to_safe) * worst_consumption_rate
+                    
+                    # 获取该车在本次调度中，可能选择充入的【总辅助电量】
+                    available_stations = [opt['station'].id for opt in vehicle_charging_options[vehicle.id]]
+                    total_charged = gp.quicksum(charge_amount[vehicle.id, s_id] for s_id in available_stations) if available_stations else 0
+                    
+                    # 修复核心：(现有电量 + 准备充入电量) >= 往返消耗，用以打通“先充电后送货”的逻辑
+                    model.addConstr(
+                        y[task.id, vehicle.id] * required_energy_for_roundtrip <= vehicle.current_battery + total_charged,
+                        name=f"safe_battery_{task.id}_{vehicle.id}"
+                    )
+
+            # --- 6. 新增: 动态充电量约束 ---
+            for (v_id, s_id), var in z.items():
+                target_vehicle = next(v for v in vehicles if v.id == v_id)
+                max_charge_needed = target_vehicle.max_battery - target_vehicle.current_battery
+                
+                # 如果不选该充电站，充电量为0；如果选中，最低充入20%电量或按需补能，最大不超过满电
+                model.addConstr(charge_amount[v_id, s_id] <= max_charge_needed * var)
+                model.addConstr(charge_amount[v_id, s_id] >= 0.2 * target_vehicle.max_battery * var)
+
             # === 优化后的目标函数 ===
-            # Maximize (TotalScore - γ × TotalDistance - λ × NumChargingEvents)
+            # Maximize (TotalScore - γ × TotalDistance - λ × NumChargingEvents - ChargingTime)
             
             # 总得分项
             total_score = 0
@@ -179,14 +218,17 @@ class GurobiEVRPScheduler:
                     task_score = base_score + min(50, time_bonus)
                     total_score += y[task.id, vehicle.id] * task_score
 
-            # 总距离惩罚项
+            # 总距离惩罚项 (包含前瞻性路径惩罚 Lookahead Cost)
             total_distance_penalty = 0
             for task in filtered_tasks:
+                dist_to_safe = dist_helper.get_distance(task.location_node, vehicle.depot_node) or 10000.0
                 for vehicle in vehicles:
                     origin = vehicle_origins[vehicle.id]
-                    task_distance = dist_helper.get_distance(origin, task.location_node)
-                    if task_distance is not None:
-                        total_distance_penalty += y[task.id, vehicle.id] * task_distance * self.distance_penalty_gamma
+                    dist_to_task = dist_helper.get_distance(origin, task.location_node)
+                    if dist_to_task is not None:
+                        # 惩罚项 = 去程距离 + 返程距离 (避免死胡同)
+                        total_lookahead_dist = dist_to_task + dist_to_safe
+                        total_distance_penalty += y[task.id, vehicle.id] * total_lookahead_dist * self.distance_penalty_gamma
 
             # 充电距离成本
             charging_distance_cost = 0
@@ -195,15 +237,22 @@ class GurobiEVRPScheduler:
 
             # 智能充电惩罚项 (λ × NumChargingEvents + 启动成本)
             charging_events_penalty = 0
+            charging_time_penalty = 0  # 新增
             for (v_id, s_id), var in z.items():
-                # 充电次数惩罚
+                target_vehicle = next(v for v in vehicles if v.id == v_id)
+                # 充电次数与启动惩罚
                 charging_events_penalty += var * self.charging_penalty_lambda
-                # 启动成本惩罚
                 charging_events_penalty += var * charging_penalty[(v_id, s_id)]
+                # 新增：尽可能减少充电时长 (充电量 / 充电速率) 转换为成本，寻找最少补能时间点
+                charging_time_penalty += (charge_amount[v_id, s_id] / target_vehicle.charge_rate) * 0.1
 
-            # 组合目标函数
+            # 放弃任务极高惩罚 (防止随意丢弃任务)
+            DROP_PENALTY = 50000
+            total_drop_penalty = gp.quicksum(drop[task.id] * DROP_PENALTY for task in filtered_tasks)
+
+            # 组合目标函数 (引入了弃单惩罚与充电时间成本)
             objective = (total_score - total_distance_penalty - 
-                        charging_distance_cost - charging_events_penalty)
+                        charging_distance_cost - charging_events_penalty - charging_time_penalty - total_drop_penalty)
             
             model.setObjective(objective, GRB.MAXIMIZE)
 
@@ -219,13 +268,15 @@ class GurobiEVRPScheduler:
                     for vehicle in vehicles:
                         if y[task.id, vehicle.id].x > 0.5:
                             assignments[str(vehicle.id)].append(f"TASK:{task.id}")
-                            print(f"  [Gurobi] 任务 {task.id} -> 车辆 {vehicle.id}")
+                            print(f"  [Gurobi] 任务 {task.id} -> 车辆 {vehicle.id} (含保障电量判定)")
 
                 # 解析充电决策
                 for (v_id, s_id), var in z.items():
                     if var.x > 0.5:
-                        assignments[str(v_id)].insert(0, f"CHARGE:{s_id}")  # 充电放在任务前
-                        print(f"  [Gurobi] 车辆 {v_id} -> 充电站 {s_id}")
+                        opt_amt = charge_amount[v_id, s_id].x
+                        # 修复：为兼容底层的 command.split(":")，此处恢复标准两段式指令，隐式让仿真器充至满电
+                        assignments[str(v_id)].insert(0, f"CHARGE:{s_id}") 
+                        print(f"  [Gurobi] 车辆 {v_id} -> 充电站 {s_id} (预计动态补能: {opt_amt:.1f} kWh, 下发补能指令)")
 
                 print(f"  [Gurobi] 优化完成，目标值: {model.objVal:.2f}")
             else:
