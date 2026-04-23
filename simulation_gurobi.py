@@ -1,4 +1,10 @@
 # simulation_engine.py
+import sys
+import io
+
+# 解决 Windows 终端打印 Emoji 时的 GBK 编码报错
+if sys.stdout.encoding != 'utf-8':
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
 import networkx as nx
 import heapq
@@ -439,7 +445,7 @@ class Simulator:
             # 修复：确保键与 ID 一致
             self.tasks[new_task.id] = new_task
             print(f"  [事件] 新任务生成: {new_task}")
-
+         
         # --- 新增：核心调度逻辑 ---
         # 如果有待分配任务，且有车空闲
         pending_tasks = [t for t in self.tasks.values() if t.status == "PENDING"]
@@ -534,7 +540,7 @@ if __name__ == '__main__':
     DISTANCE_MATRIX_FILE = os.path.join(DATA_FOLDER, "distance_matrix.csv")
     
     # 确保这里是正确的文件名
-    ROAD_NETWORK_FILE = "shanghai_china.graphml" 
+    ROAD_NETWORK_FILE = "shanghai_old_china.graphml" 
 
     print("正在加载数据文件...")
     try:
@@ -542,6 +548,7 @@ if __name__ == '__main__':
         distance_matrix_df = pd.read_csv(DISTANCE_MATRIX_FILE, index_col=0)
         
         # ！！！关键修改：添加 simplify=False 参数，或者确保加载方式与生成时一致！！！
+       # 手动指定编码为 utf-8，避免系统默认 GBK 报错
         G = nx.read_graphml(ROAD_NETWORK_FILE)
         
         # 将节点 ID 转换为整数 (GraphML有时会把ID存为字符串)

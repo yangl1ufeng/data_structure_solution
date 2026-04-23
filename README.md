@@ -96,7 +96,7 @@ Gurobi 是商业优化器，需要有效许可证：
 grbgetkey YOUR_LICENSE_KEY
 ```
 
-#### 试用许可证
+#### 试用许可证grbgetkey
 ```bash
 # 下载并安装 Gurobi，自动包含试用许可证
 # 访问：https://www.gurobi.com/downloads/
@@ -143,7 +143,7 @@ local/
 # source .venv/bin/activate  # macOS/Linux
 
 # 运行地图配置工具
-streamlit run testweb.py
+streamlit run finalweb_randommap.py
 ```
 
 在打开的网页中：
