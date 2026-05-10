@@ -4,235 +4,217 @@ import networkx as nx
 
 class GurobiEVRPScheduler:
     """
-    高级 Gurobi EVRP 调度器 - 深度优化版本
-    目标: 最大化总评分 (Total Score Maximization)
-    特性: 智能充电阈值、任务冲突过滤、动态起点同步
+    基于严格 MILP (混合整数线性规划) 的 EVRPTW 调度器
+    实现了带时间窗、载重和连续电量流的多车路线排班系统。
     """
 
-    def __init__(self, time_limit=5, gap_tolerance=0.05):
+    def __init__(self, time_limit=10, gap_tolerance=0.05):
         self.time_limit = time_limit
         self.gap_tolerance = gap_tolerance
-        
-        # 优化参数
-        self.distance_penalty_gamma = 0.001  # 距离惩罚系数
-        self.charging_penalty_lambda = 10.0  # 充电次数惩罚系数
-        self.charging_startup_cost = 5.0     # 中等电量充电启动成本
-        
-        # 智能充电阈值
-        self.high_battery_threshold = 0.8    # 80% 以上禁充
-        self.medium_battery_threshold = 0.5  # 50-80% 惩罚充电
-        
-    def preprocess_data(self, vehicles, pending_tasks, stations, dist_helper, graph):
-        """
-        数据预处理：过滤冲突任务、构建智能充电决策空间
-        """
-        # === 1. 任务准入与冲突过滤 ===
-        print("  [预处理] 开始任务冲突过滤...")
-        
-        # 收集所有车辆计划中的任务ID
-        locked_task_ids = set()
-        for vehicle in vehicles:
-            for plan_item in vehicle.plan_queue:
-                if plan_item.startswith("TASK:"):
-                    task_id = plan_item.split(":", 1)[1]
-                    locked_task_ids.add(task_id)
-        
-        # 严格过滤：只保留 PENDING 且未锁定的任务
-        filtered_tasks = []
-        for task in pending_tasks:
-            if task.status == "PENDING" and task.id not in locked_task_ids:
-                filtered_tasks.append(task)
-            else:
-                print(f"  [过滤] 任务 {task.id} 被过滤 (状态:{task.status}, 锁定:{task.id in locked_task_ids})")
-        
-        print(f"  [预处理] 任务过滤完成: {len(pending_tasks)} -> {len(filtered_tasks)}")
-        
-        # === 2. 智能充电站决策空间构建 ===
-        print("  [预处理] 构建智能充电决策空间...")
-        
-        # 为每辆车构建个性化的可访问充电站列表
-        vehicle_charging_options = {}
-        for vehicle in vehicles:
-            battery_percentage = vehicle.current_battery / vehicle.max_battery
-            available_stations = []
-            
-            if battery_percentage <= self.high_battery_threshold:
-                # 80% 以下才允许充电
-                for station in stations:
-                    # 检查从当前位置是否能到达充电站
-                    distance = dist_helper.get_distance(vehicle.current_location, station.location_node)
-                    if distance is not None and distance < float('inf'):
-                        charge_option = {
-                            'station': station,
-                            'distance': distance,
-                            'battery_level': battery_percentage,
-                            'penalty_cost': 0.0 if battery_percentage <= self.medium_battery_threshold 
-                                          else self.charging_startup_cost
-                        }
-                        available_stations.append(charge_option)
-                
-                print(f"  [充电策略] 车辆 {vehicle.id} (电量:{battery_percentage:.1%}) -> 可充电站: {len(available_stations)}")
-            else:
-                print(f"  [充电策略] 车辆 {vehicle.id} (电量:{battery_percentage:.1%}) -> 禁止充电 (>80%)")
-            
-            vehicle_charging_options[vehicle.id] = available_stations
-        
-        # === 3. 动态起点同步 ===
-        print("  [预处理] 同步车辆动态起点...")
-        vehicle_origins = {}
-        for vehicle in vehicles:
-            vehicle_origins[vehicle.id] = vehicle.current_location
-            print(f"  [起点] 车辆 {vehicle.id} 当前位置: {vehicle.current_location}")
-        
-        return {
-            'filtered_tasks': filtered_tasks,
-            'vehicle_charging_options': vehicle_charging_options,
-            'vehicle_origins': vehicle_origins
-        }
+        self.big_M = 100000.0  # 大M法常数
 
     def solve_assignment(self, vehicles, pending_tasks, stations, dist_helper, graph):
-        """
-        构建并求解优化后的 MILP 模型
-        """
-        if not vehicles or not pending_tasks:
-            return {str(v.id): [] for v in vehicles}
+        model = gp.Model("EVRPTW_Routing")
+        model.setParam('OutputFlag', 0)
+        model.setParam('TimeLimit', self.time_limit)
+        model.setParam('MIPGap', self.gap_tolerance)
 
-        # === 数据预处理 ===
-        preprocessed = self.preprocess_data(vehicles, pending_tasks, stations, dist_helper, graph)
-        filtered_tasks = preprocessed['filtered_tasks']
-        vehicle_charging_options = preprocessed['vehicle_charging_options']
-        vehicle_origins = preprocessed['vehicle_origins']
+        # -----------------------------
+        # 1. 图节点构建与预处理剪枝
+        # -----------------------------
+        # 使用唯一标识符取代物理节点ID，避免因拆分任务同址导致 Gurobi 变量重复
+        task_nodes = [f"TASK_{t.id}" for t in pending_tasks]
+        station_nodes = [f"STATION_{s.id}" for s in stations]
         
-        if not filtered_tasks:
-            print("  [Gurobi] 无有效任务可分配")
-            return {str(v.id): [] for v in vehicles}
-
-        try:
-            # === 创建模型 ===
-            model = gp.Model("EVRP_Optimized")
-            model.setParam('OutputFlag', 0)
-            model.setParam('TimeLimit', self.time_limit)
-            model.setParam('MIPGap', self.gap_tolerance)
-
-            # === 决策变量 ===
-            # 任务分配变量: y[task_id, vehicle_id]
-            y = {}
-            for task in filtered_tasks:
-                for vehicle in vehicles:
-                    y[task.id, vehicle.id] = model.addVar(vtype=GRB.BINARY, 
-                                                          name=f"y_{task.id}_{vehicle.id}")
+        V_tasks = {f"TASK_{t.id}": t for t in pending_tasks}
+        V_stations = {f"STATION_{s.id}": s for s in stations}
+        
+        # 建立 虚拟ID -> 物理坐标 的映射字典，用于测距
+        location_map = {}
+        for t in pending_tasks: location_map[f"TASK_{t.id}"] = t.location_node
+        for s in stations: location_map[f"STATION_{s.id}"] = s.location_node
+        for k in vehicles:
+            location_map[f"START_{k.id}"] = k.current_location
+            location_map[f"END_{k.id}"] = k.depot_node
+        
+        valid_edges = []
+        for k in vehicles:
+            start_k = f"START_{k.id}"
+            end_k = f"END_{k.id}"
             
-            # 充电决策变量: z[vehicle_id, station_id]
-            z = {}
-            charging_distance = {}
-            charging_penalty = {}
+            V_k = [start_k, end_k] + task_nodes + station_nodes
             
-            for vehicle in vehicles:
-                for charge_option in vehicle_charging_options[vehicle.id]:
-                    station = charge_option['station']
-                    var_key = (vehicle.id, station.id)
-                    z[var_key] = model.addVar(vtype=GRB.BINARY, 
-                                            name=f"z_{vehicle.id}_{station.id}")
-                    charging_distance[var_key] = charge_option['distance']
-                    charging_penalty[var_key] = charge_option['penalty_cost']
+            for i in V_k:
+                for j in V_k:
+                    if i == j or i == end_k or j == start_k:
+                        continue
+                    valid_edges.append((i, j, k.id))
+                    
+        # 兜底去重
+        valid_edges = list(set(valid_edges))
 
-            # === 约束条件 ===
-            # 1. 每个任务最多分配给一辆车
-            for task in filtered_tasks:
+        # -----------------------------
+        # 2. 决策变量定义
+        # -----------------------------
+        # x[i, j, k]: 车辆 k 是否驶过边 (i, j)
+        x = model.addVars(valid_edges, vtype=GRB.BINARY, name="x")
+        
+        # y[i]: 任务 i 是否被完成 (允许弃单惩罚)
+        y = model.addVars(task_nodes, vtype=GRB.BINARY, name="y")
+
+        # 连续流变量 (针对每个节点和每辆车)
+        t = {} # 到达时间 time
+        b = {} # 离开电量 battery
+        u = {} # 剩余载重 payload
+        charge_amt = {} # 充电量
+        
+        for k in vehicles:
+            start_k = f"START_{k.id}"
+            end_k = f"END_{k.id}"
+            V_k = [start_k, end_k] + task_nodes + station_nodes
+            
+            for i in V_k:
+                t[i, k.id] = model.addVar(vtype=GRB.CONTINUOUS, lb=0.0, name=f"t_{i}_{k.id}")
+                b[i, k.id] = model.addVar(vtype=GRB.CONTINUOUS, lb=0.0, ub=k.max_battery, name=f"b_{i}_{k.id}")
+                u[i, k.id] = model.addVar(vtype=GRB.CONTINUOUS, lb=0.0, ub=k.max_payload, name=f"u_{i}_{k.id}")
+                if i in station_nodes:
+                    charge_amt[i, k.id] = model.addVar(vtype=GRB.CONTINUOUS, lb=0.0, ub=k.max_battery, name=f"charge_{i}_{k.id}")
+
+        # -----------------------------
+        # 3. 核心约束逻辑
+        # -----------------------------
+        for k in vehicles:
+            start_k = f"START_{k.id}"
+            end_k = f"END_{k.id}"
+            V_sub = task_nodes + station_nodes
+
+            # a. 流平衡约束 (Flow Balance)
+            # 起点出度为 1
+            model.addConstr(gp.quicksum(x[start_k, j, k.id] for j in V_sub + [end_k] if (start_k, j, k.id) in valid_edges) == 1)
+            # 终点入度为 1
+            model.addConstr(gp.quicksum(x[i, end_k, k.id] for i in V_sub + [start_k] if (i, end_k, k.id) in valid_edges) == 1)
+            
+            # 中间节点流平衡 (入度 = 出度)
+            for j in V_sub:
                 model.addConstr(
-                    gp.quicksum(y[task.id, v.id] for v in vehicles) <= 1,
-                    name=f"task_assignment_{task.id}"
+                    gp.quicksum(x[i, j, k.id] for i in [start_k] + V_sub if (i, j, k.id) in valid_edges) == 
+                    gp.quicksum(x[j, p, k.id] for p in V_sub + [end_k] if (j, p, k.id) in valid_edges)
                 )
 
-            # 2. 每辆车最多分配一个任务（简化版本）
-            for vehicle in vehicles:
-                model.addConstr(
-                    gp.quicksum(y[t.id, vehicle.id] for t in filtered_tasks) <= 1,
-                    name=f"vehicle_capacity_{vehicle.id}"
-                )
+            # b. 起点状态初始化
+            model.addConstr(b[start_k, k.id] == k.current_battery)
+            model.addConstr(u[start_k, k.id] == k.max_payload) # 默认满载出发
+            # 假设当前仿真时间为0（相对时间）
+            model.addConstr(t[start_k, k.id] == 0)
 
-            # 3. 每辆车最多选择一个充电站
-            for vehicle in vehicles:
-                available_stations = [opt['station'].id for opt in vehicle_charging_options[vehicle.id]]
-                if available_stations:
-                    model.addConstr(
-                        gp.quicksum(z[vehicle.id, s_id] for s_id in available_stations) <= 1,
-                        name=f"charging_choice_{vehicle.id}"
-                    )
+            # c. MTZ 连续流传递与大M法约束
+            for i, j, k_id in valid_edges:
+                if k_id != k.id: continue
+                
+                # 使用映射表获取物理坐标
+                loc_i = location_map[i]
+                loc_j = location_map[j]
+                
+                dist_val = dist_helper.get_distance(loc_i, loc_j)
+                dist = 10000.0 if dist_val is None else dist_val
+                
+                travel_time = (dist / 1000.0) / k.speed_kmh * 60.0 # 分钟
+                
+                # 🔥 核心修复：补上最大载重造成的耗电率倍数，与仿真底层的安全校验严格对齐
+                energy_cost = dist * (k.consumption_rate_dist + k.max_payload * k.consumption_rate_payload)
+                
+                # (1) 时间流传递
+                # t_j >= t_i + travel_time + service_time - M(1 - x)
+                service_time_i = 0
+                if i in task_nodes: service_time_i = 10 # 卸货10分钟
+                elif i in station_nodes: service_time_i = 30 # 默认最短充电锁定时间
+                
+                model.addConstr(t[j, k.id] >= t[i, k.id] + travel_time + service_time_i - self.big_M * (1 - x[i, j, k.id]))
 
-            # 4. 载重约束
-            for vehicle in vehicles:
-                total_weight = gp.quicksum(y[t.id, vehicle.id] * t.weight for t in filtered_tasks)
-                model.addConstr(total_weight <= vehicle.max_payload, 
-                               name=f"payload_{vehicle.id}")
+                # (2) 电量流传递
+                if i in station_nodes:
+                    model.addConstr(b[j, k.id] <= b[i, k.id] + charge_amt[i, k.id] - energy_cost + self.big_M * (1 - x[i, j, k.id]))
+                else:
+                    model.addConstr(b[j, k.id] <= b[i, k.id] - energy_cost + self.big_M * (1 - x[i, j, k.id]))
+                    
+                # (3) 载重流传递
+                demands_j = V_tasks[j].weight if j in task_nodes else 0
+                model.addConstr(u[j, k.id] <= u[i, k.id] - demands_j + self.big_M * (1 - x[i, j, k.id]))
 
-            # === 优化后的目标函数 ===
-            # Maximize (TotalScore - γ × TotalDistance - λ × NumChargingEvents)
+        # d. 任务约束：每个任务必须被一辆车访问（由 y 控制是否放弃）
+        for task_node in task_nodes:
+            model.addConstr(
+                # 🔥 修复：将 k.id 替换为生成器里的 k_id，并将 task_node 替换为 j
+                gp.quicksum(x[i, j, k_id] for i, j, k_id in valid_edges if j == task_node) == y[task_node],
+                name=f"visit_{task_node}"
+            )
             
-            # 总得分项
-            total_score = 0
-            for task in filtered_tasks:
-                for vehicle in vehicles:
-                    # 简化得分计算：基础分 + 时间效益
-                    base_score = 100
-                    time_bonus = max(0, task.deadline - task.creation_time - 20)  # 假设20分钟完成
-                    task_score = base_score + min(50, time_bonus)
-                    total_score += y[task.id, vehicle.id] * task_score
+            # e. 软时间窗约束
+            task = V_tasks[task_node]
+            for k in vehicles:
+                # 记录超时变量 (非负)
+                late_var = model.addVar(lb=0.0, name=f"late_{task_node}_{k.id}")
+                model.addConstr(late_var >= t[task_node, k.id] - task.deadline)
 
-            # 总距离惩罚项
-            total_distance_penalty = 0
-            for task in filtered_tasks:
-                for vehicle in vehicles:
-                    origin = vehicle_origins[vehicle.id]
-                    task_distance = dist_helper.get_distance(origin, task.location_node)
-                    if task_distance is not None:
-                        total_distance_penalty += y[task.id, vehicle.id] * task_distance * self.distance_penalty_gamma
-
-            # 充电距离成本
-            charging_distance_cost = 0
-            for (v_id, s_id), var in z.items():
-                charging_distance_cost += var * charging_distance[(v_id, s_id)] * self.distance_penalty_gamma
-
-            # 智能充电惩罚项 (λ × NumChargingEvents + 启动成本)
-            charging_events_penalty = 0
-            for (v_id, s_id), var in z.items():
-                # 充电次数惩罚
-                charging_events_penalty += var * self.charging_penalty_lambda
-                # 启动成本惩罚
-                charging_events_penalty += var * charging_penalty[(v_id, s_id)]
-
-            # 组合目标函数
-            objective = (total_score - total_distance_penalty - 
-                        charging_distance_cost - charging_events_penalty)
+        # -----------------------------
+        # 4. 目标函数构造
+        # -----------------------------
+        REWARD_BASE = 10000
+        PENALTY_DROP = 50000
+        
+        # 最大化总分 = 任务奖励 - 距离消耗 - 迟到惩罚 - 充电次数惩罚
+        obj_expr = gp.quicksum(y[n] * REWARD_BASE for n in task_nodes)
+        obj_expr -= gp.quicksum((1 - y[n]) * (PENALTY_DROP + V_tasks[n].weight) for n in task_nodes) # 弃单惩罚
+        
+        for i, j, k_id in valid_edges:
+            # 🔥 修复：目标函数中也只需通过映射表换取物理坐标
+            dist_val = dist_helper.get_distance(location_map[i], location_map[j])
+            dist = 0 if dist_val is None else dist_val
+            obj_expr -= x[i, j, k_id] * dist * 0.01 # 减去行驶距离惩罚
             
-            model.setObjective(objective, GRB.MAXIMIZE)
+        # 充电惩罚
+        for k in vehicles:
+            for s in station_nodes:
+                station_visits = gp.quicksum(x[i, s, k.id] for i, jj, kk in valid_edges if jj == s and kk == k.id)
+                obj_expr -= station_visits * 500
 
-            # === 求解 ===
-            model.optimize()
+        model.setObjective(obj_expr, GRB.MAXIMIZE)
+        model.optimize()
 
-            # === 解析结果 ===
-            assignments = {str(v.id): [] for v in vehicles}
-            
-            if model.status == GRB.OPTIMAL or model.status == GRB.TIME_LIMIT:
-                # 解析任务分配
-                for task in filtered_tasks:
-                    for vehicle in vehicles:
-                        if y[task.id, vehicle.id].x > 0.5:
-                            assignments[str(vehicle.id)].append(f"TASK:{task.id}")
-                            print(f"  [Gurobi] 任务 {task.id} -> 车辆 {vehicle.id}")
-
-                # 解析充电决策
-                for (v_id, s_id), var in z.items():
-                    if var.x > 0.5:
-                        assignments[str(v_id)].insert(0, f"CHARGE:{s_id}")  # 充电放在任务前
-                        print(f"  [Gurobi] 车辆 {v_id} -> 充电站 {s_id}")
-
-                print(f"  [Gurobi] 优化完成，目标值: {model.objVal:.2f}")
-            else:
-                print(f"  [Gurobi] 求解失败，状态: {model.status}")
-
-            return assignments
-
-        except Exception as e:
-            print(f"  [Gurobi] 异常: {e}")
-            return {str(v.id): [] for v in vehicles}
+        # -----------------------------
+        # 5. 结果解析为 Command List
+        # -----------------------------
+        assignments = {str(k.id): [] for k in vehicles}
+        
+        if model.status in [GRB.OPTIMAL, GRB.TIME_LIMIT] and model.SolCount > 0:
+            for k in vehicles:
+                start_k = f"START_{k.id}"
+                end_k = f"END_{k.id}"
+                
+                curr_node = start_k
+                route_commands = []
+                
+                # 追踪有向图链路
+                while curr_node != end_k:
+                    next_node = None
+                    for j in [end_k] + task_nodes + station_nodes:
+                        if (curr_node, j, k.id) in valid_edges and x[curr_node, j, k.id].X > 0.5:
+                            next_node = j
+                            break
+                            
+                    if not next_node or next_node == end_k:
+                        break
+                        
+                    if next_node in task_nodes:
+                        t_obj = V_tasks[next_node]
+                        route_commands.append(f"TASK:{t_obj.id}")
+                    elif next_node in station_nodes:
+                        s_obj = V_stations[next_node]
+                        route_commands.append(f"CHARGE:{s_obj.id}")
+                        
+                    curr_node = next_node
+                    
+                assignments[str(k.id)] = route_commands
+                print(f"  [EVRPTW] 车辆 {k.id} 生成连续路径排序: {route_commands}")
+        
+        return assignments

@@ -6,6 +6,7 @@ import random
 import math
 import pandas as pd
 import os
+import argparse  # <--- 新增引入 argparse
 
 # --- 引入 Gurobi 调度器 ---
 # 确保 scheduler_gurobi.py 在同一目录下
@@ -140,6 +141,12 @@ class Vehicle:
 
     def execute_plan(self, G, tasks_map, stations_map):
         """执行计划队列中的指令"""
+        if self.current_battery <= 0:
+            if self.plan_queue:
+                print(f"  [警告] 车辆 {self.id} 电量耗尽，放弃剩余计划。")
+                self.plan_queue = []
+            return
+
         if self.status != "IDLE":
             return
 
@@ -148,22 +155,51 @@ class Vehicle:
                 self.go_to_depot(G)
             return
 
-        command = self.plan_queue.pop(0)
+        # 窥探(不立刻弹出)下一个命令，进行安全校验
+        command = self.plan_queue[0]
         cmd_type, target_id = command.split(":")
         
-        print(f"  [执行] 车辆 {self.id} 开始执行: {command}")
-
         if cmd_type == "TASK":
             task = tasks_map.get(target_id)
-            if task and task.status == "PENDING":
+            # --- 修复Bug：允许执行 ASSIGNED 状态的任务（因为调度器刚把状态锁定了） ---
+            if task and task.status in ["PENDING", "ASSIGNED"]:
+                # 起步前的实时安全电量双重检测 (Double Check)
+                try:
+                    dist_to_task = nx.shortest_path_length(G, self.current_location, task.location_node, weight='weight')
+                    dist_to_depot = nx.shortest_path_length(G, task.location_node, self.depot_node, weight='weight')
+                    # 按最大耗电率保守估算: 前往任务点 + 返回仓库的兜底电量
+                    worst_consumption = (dist_to_task + dist_to_depot) * (self.consumption_rate_dist + self.max_payload * self.consumption_rate_payload)
+                    
+                    if self.current_battery < worst_consumption:
+                        print(f"  [安全拦截] 车辆 {self.id} 欲往任务 {task.id}，电量({self.current_battery:.1f})不足以完成兜底往返({worst_consumption:.1f})！清空排队，强制返程。")
+                        
+                        # 🔥 核心修复：被安全拦截抛弃的排队任务，必须恢复为 PENDING 状态，防止永远假死！
+                        for item in self.plan_queue:
+                            if item.startswith("TASK:"):
+                                tid = item.split(":", 1)[1]
+                                if tid in tasks_map:
+                                    tasks_map[tid].status = "PENDING"
+                        
+                        self.plan_queue = [] 
+                        self.go_to_depot(G)  
+                        return
+                except nx.NetworkXNoPath:
+                    pass 
+
+                # 校验通过，正式弹出并执行
+                self.plan_queue.pop(0)
+                print(f"  [执行] 车辆 {self.id} 开始执行: {command}")
                 self.assign_task(task, G)
             else:
+                self.plan_queue.pop(0)
                 print(f"    -> 任务 {target_id} 状态异常 ({task.status if task else 'None'}), 跳过。")
                 self.execute_plan(G, tasks_map, stations_map) 
 
         elif cmd_type == "CHARGE":
+            self.plan_queue.pop(0)
             station = stations_map.get(target_id)
             if station:
+                print(f"  [执行] 车辆 {self.id} 开始执行: {command}")
                 self.go_to_station(station, G)
 
     def assign_task(self, task, G):
@@ -246,7 +282,9 @@ class Vehicle:
                 return None
 
             task_to_return.status = "COMPLETED"
-            self.go_to_depot(G)
+            # --- 修复核心：取消强制调用 self.go_to_depot(G)，改为待命状态 ---
+            # 这样车辆会自动扫描计划列表，原地起步前往下一个任务 (多点配送)
+            self.status = "IDLE"
             self.current_task = None 
             return task_to_return
         return None
@@ -347,33 +385,37 @@ class Simulator:
                             break
     
     def _update_score(self, task):
+        # 基础跑腿费
         base_reward = 100
-        alpha = 1.0  
-        beta = 2.0   
-        max_bonus = 50.0
+        
+        # 软时间窗计分权重可以自定义
+        alpha = 1.0  # 提前一分钟加 1 分
+        beta = 2.0   # 超时一分钟扣 2 分 (惩罚力度大于提前奖励)
 
         completion_time = self.current_time
         time_diff = task.deadline - completion_time
         
-        early_bonus = 0
-        late_penalty = 0
-
         if time_diff >= 0:
-            early_bonus = min(max_bonus, time_diff * alpha)
+            # 提前送达: 基础分 + 提前奖励
+            early_bonus = time_diff * alpha
+            task_score = base_reward + early_bonus
+            print(f"  [计分] 任务 {task.id} 准时完成！(限额:{task.deadline}, 实际:{completion_time}) | 基础:{base_reward} 提前奖励:+{early_bonus:.1f} -> 此单得分:{task_score:.1f}")
         else:
+            # 超时送达: 基础分 - 超时惩罚
             late_penalty = abs(time_diff) * beta
+            task_score = base_reward - late_penalty
+            print(f"  [计分] 任务 {task.id} 迟到完成！(限额:{task.deadline}, 实际:{completion_time}) | 基础:{base_reward} 超时惩罚:-{late_penalty:.1f} -> 此单得分:{task_score:.1f}")
             
-        task_score = base_reward + early_bonus - late_penalty
         self.score += task_score
-        
-        print(f"  [计分] 任务 {task.id} 完成！(DL:{task.deadline}, T:{completion_time}) 基础:{base_reward} 提前:{early_bonus:.1f} 逾期:-{late_penalty:.1f} -> 得分:{task_score:.1f}, 总分:{self.score:.1f}")
+        print(f"         当前系统总分: {self.score:.1f}")
 
     def _check_failed_tasks(self):
-        for task in self.tasks.values():
-            if task.status in ["PENDING", "ASSIGNED"] and self.current_time > task.deadline:
-                task.status = "FAILED"
-                self.score -= 200 
-                print(f"  [失败] 任务 {task.id} 超时未完成！扣分: 200, 总分: {self.score}")
+        """
+        废弃原本的硬死线(Hard Deadline)淘汰机制。
+        改为软死线(Soft Deadline)后，任务无论多久都会保留在队列中，
+        通过 _update_score 中的无上限扣分来惩罚系统的低效。
+        """
+        pass
 
     def step(self):
         print(f"\n--- 时间: {self.current_time} 分钟 ---")
@@ -383,7 +425,16 @@ class Simulator:
             self.tasks[new_task.id] = new_task
             print(f"  [事件] 新任务生成: {new_task}")
 
-        pending_tasks = [t for t in self.tasks.values() if t.status == "PENDING"]
+        # --- 修复 1: 扫描**所有**车辆的计划队列，防止正在充电的车其绑定的任务被别人抢走 ---
+        locked_task_ids = set()
+        for v in self.vehicles:
+            for plan_item in v.plan_queue:
+                if plan_item.startswith("TASK:"):
+                    locked_task_ids.add(plan_item.split(":", 1)[1])
+        
+        # 将真正无人认领的任务送去调度
+        pending_tasks = [t for t in self.tasks.values() if t.status == "PENDING" and str(t.id) not in locked_task_ids]
+        
         idle_vehicles = [v for v in self.vehicles if v.status == "IDLE" and not v.plan_queue]
         
         if pending_tasks and idle_vehicles:
@@ -400,12 +451,26 @@ class Simulator:
             if not assignments:
                 print("  [警告] 调度器返回了空字典 (可能是不可行)")
 
+            # 🔥 新增：判定防死锁，如果 Gurobi 拒绝给所有车辆派单(即彻底放弃当前所有 Pending 任务)
+            total_assigned = sum(len(route) for route in assignments.values()) if assignments else 0
+            if total_assigned == 0:
+                print(f"  [拦截] 调度器集体罢工！这说明剩余的 {len(pending_tasks)} 个任务(超载/过远)永远无法完成，已强制标记为 FAILED 防止死锁！")
+                for t in pending_tasks:
+                    t.status = "FAILED"
+
             for v_id, route in assignments.items():
                 if route:
                     target_vehicle = next((v for v in self.vehicles if str(v.id) == str(v_id)), None)
                     if target_vehicle:
                         target_vehicle.plan_queue = route
                         print(f"  [调度] 车辆 {target_vehicle.id} 更新计划: {route}")
+                        
+                        # --- 新增: 提前锁定任务状态，避免车辆在排队/充电期间任务被系统当作无人认领而超时误杀 ---
+                        for item in route:
+                            if item.startswith("TASK:"):
+                                t_id = item.split(":", 1)[1]
+                                if t_id in self.tasks and self.tasks[t_id].status == "PENDING":
+                                    self.tasks[t_id].status = "ASSIGNED"
                     else:
                         print(f"  [错误] 调度器返回未知车辆ID: {v_id}")
                 else:
@@ -444,7 +509,7 @@ class Simulator:
         print(f"--- 初始状态 (时间: 0 分钟前) ---")
         for v in self.vehicles:
             print(f"  [初始] {v}")
-            if v.current_location != self.depot_node:
+            if v.current_location != v.depot_node:
                  print(f"  [警告] 车辆 {v.id} 初始化位置异常！")
 
         while not self.is_simulation_finished() and self.current_time < max_simulation_duration:
@@ -459,6 +524,11 @@ class Simulator:
 # --- 3. 仿真设置与运行示例 ---
 
 if __name__ == '__main__':
+    # --- 新增: 解析命令行参数 ---
+    parser = argparse.ArgumentParser(description="EVRP Simulation")
+    parser.add_argument('--num_vehicles', type=int, default=3, help='自定义车辆数量')
+    args = parser.parse_args()
+
     DATA_FOLDER = "data"
     SNAPPED_POINTS_FILE = os.path.join(DATA_FOLDER, "snapped_points.csv")
     DISTANCE_MATRIX_FILE = os.path.join(DATA_FOLDER, "distance_matrix.csv")
@@ -524,27 +594,22 @@ if __name__ == '__main__':
 
     task_point_info = snapped_points_df[snapped_points_df['type'].str.contains("Task Point")]
     
+    # === 动态车队配置 ===
+    NUM_VEHICLES = args.num_vehicles  # <--- 接收前端传来的参数
+    print(f"🚀 系统将使用 {NUM_VEHICLES} 辆车进行仿真调度...")
+    
     vehicle_configs = [
         {
-            "vehicle_id": 1, 
+            "vehicle_id": i + 1, 
             "depot_node": DEPOT_NODE, 
             "max_battery": 100,           
             "max_payload": 1000, 
             "charge_rate": 2,             
             "speed_kmh": 40,              
-            "consumption_rate_dist": 0.00025,    # <--- 在这里修改基础耗电率
-            "consumption_rate_payload": 0.0000001 # <--- 在这里修改与载重相关的额外耗电率
-        },
-        {
-            "vehicle_id": 2, 
-            "depot_node": DEPOT_NODE, 
-            "max_battery": 100, 
-            "max_payload": 1000, 
-            "charge_rate": 2, 
-            "speed_kmh": 40,
-            "consumption_rate_dist": 0.00025,    # <--- 同上
-            "consumption_rate_payload": 0.0000001 # <--- 同上
+            "consumption_rate_dist": 0.0025,       
+            "consumption_rate_payload": 0.0000005 
         }
+        for i in range(NUM_VEHICLES)
     ]
 
     simulator = Simulator(G, vehicle_configs, station_configs, [], dist_helper)
@@ -585,4 +650,4 @@ if __name__ == '__main__':
         print("警告: 未在 snapped_points.csv 中找到任务点，将不会生成任何任务。")
 
     # --- E. 运行仿真: 指定最大断路运行时长，而非绝对运行时间 ---
-    simulator.run(max_simulation_duration=1440) 
+    simulator.run(max_simulation_duration=1440)
