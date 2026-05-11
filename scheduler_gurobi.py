@@ -1,3 +1,11 @@
+# 必须先导 os，先设置环境变量！
+import os
+
+# 强制配置环境变量，使 Gurobi 读取当前目录下的许可证文件
+current_dir = os.path.dirname(os.path.abspath(__file__))
+os.environ["GRB_LICENSE_FILE"] = os.path.join(current_dir, "gurobi.lic")
+
+# 设置完环境变量后，再导入 gurobipy
 import gurobipy as gp
 from gurobipy import GRB
 import networkx as nx
@@ -14,6 +22,27 @@ class GurobiEVRPScheduler:
         self.big_M = 100000.0  # 大M法常数
 
     def solve_assignment(self, vehicles, pending_tasks, stations, dist_helper, graph):
+        # --- 新增预处理: 提前剔除无法连通的孤岛任务，根本不将其纳入数学模型 ---
+        reachable_tasks = []
+        for t in pending_tasks:
+            is_reachable = False
+            for k in vehicles:
+                dist_to_task = dist_helper.get_distance(k.current_location, t.location_node)
+                # 只要网路中至少有一辆车能开到这个点，它就不是死点
+                if dist_to_task is not None:
+                    is_reachable = True
+                    break
+            if is_reachable:
+                reachable_tasks.append(t)
+            # 如果不可达，连 print 占位都不需要提供，直接在系统层面“蒸发”这个任务
+        
+        # 覆盖为清洗后的安全任务集
+        pending_tasks = reachable_tasks
+        
+        # 如果所有任务都是死点（或本来就没任务），直接返回空分配，省去求解
+        if not pending_tasks:
+            return {str(k.id): [] for k in vehicles}
+
         model = gp.Model("EVRPTW_Routing")
         model.setParam('OutputFlag', 0)
         model.setParam('TimeLimit', self.time_limit)

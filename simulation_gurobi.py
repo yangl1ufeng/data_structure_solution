@@ -6,11 +6,11 @@ import random
 import math
 import pandas as pd
 import os
-import argparse  # <--- 新增引入 argparse
+import argparse  
 
-# --- 引入 Gurobi 调度器 ---
-# 确保 scheduler_gurobi.py 在同一目录下
+# --- 引入调度器 ---
 from scheduler_gurobi import GurobiEVRPScheduler 
+from scheduler_greedy import GreedyEVRPScheduler  # <--- 引入独立的贪心调度器
 
 # --- 0. 距离辅助类 ---
 class DistanceHelper:
@@ -319,7 +319,8 @@ class Vehicle:
 
 class Simulator:
     """物流仿真引擎"""
-    def __init__(self, graph, vehicle_configs, station_configs, initial_tasks, dist_helper):
+    # 新增 strategy 参数
+    def __init__(self, graph, vehicle_configs, station_configs, initial_tasks, dist_helper, strategy="gurobi"):
         self.G = graph
         self.dist_helper = dist_helper 
         self.current_time = 0
@@ -331,7 +332,19 @@ class Simulator:
         
         self.tasks = {t.id: t for t in initial_tasks}
         self.task_event_queue = []
-        self.scheduler = GurobiEVRPScheduler(time_limit=5)
+        
+        # --- 根据参数动态加载算法模块 ---
+        if strategy == "gurobi":
+            self.scheduler = GurobiEVRPScheduler(time_limit=5)
+            print("⚙️ 已加载高级算法模块: Gurobi 全局最优调度")
+        elif strategy == "nearest":
+            self.scheduler = GreedyEVRPScheduler(strategy_type="nearest")
+            print("⚙️ 已加载基础算法模块: 启发式贪心调度 (距离最近优先)")
+        elif strategy == "largest":
+            self.scheduler = GreedyEVRPScheduler(strategy_type="largest")
+            print("⚙️ 已加载基础算法模块: 启发式贪心调度 (最大载重优先)")
+        else:
+            self.scheduler = GurobiEVRPScheduler(time_limit=5)
 
     def is_simulation_finished(self):
         """检查是否所有任务都已处理完毕，且所有车辆均已空闲且无待办计划"""
@@ -524,9 +537,10 @@ class Simulator:
 # --- 3. 仿真设置与运行示例 ---
 
 if __name__ == '__main__':
-    # --- 新增: 解析命令行参数 ---
     parser = argparse.ArgumentParser(description="EVRP Simulation")
     parser.add_argument('--num_vehicles', type=int, default=3, help='自定义车辆数量')
+    # 新增策略切换参数
+    parser.add_argument('--strategy', type=str, default='gurobi', choices=['gurobi', 'nearest', 'largest'], help='选择任务调度策略')
     args = parser.parse_args()
 
     DATA_FOLDER = "data"
@@ -587,7 +601,8 @@ if __name__ == '__main__':
              print(f"❌ 警告: 充电站节点 {sid} 不在图中，将被跳过。")
     
     station_configs = [
-        {"station_id": f"S{i+1}", "location_node": row['node_id'], "num_chargers": 2} 
+        # 修改 num_chargers 的默认值为 20
+        {"station_id": f"S{i+1}", "location_node": row['node_id'], "num_chargers": 20} 
         for i, row in station_info.iterrows()
         if row['node_id'] in G 
     ]
@@ -595,7 +610,7 @@ if __name__ == '__main__':
     task_point_info = snapped_points_df[snapped_points_df['type'].str.contains("Task Point")]
     
     # === 动态车队配置 ===
-    NUM_VEHICLES = args.num_vehicles  # <--- 接收前端传来的参数
+    NUM_VEHICLES = args.num_vehicles
     print(f"🚀 系统将使用 {NUM_VEHICLES} 辆车进行仿真调度...")
     
     vehicle_configs = [
@@ -612,7 +627,8 @@ if __name__ == '__main__':
         for i in range(NUM_VEHICLES)
     ]
 
-    simulator = Simulator(G, vehicle_configs, station_configs, [], dist_helper)
+    # 将外部接收到的策略参数传给仿真器实例
+    simulator = Simulator(G, vehicle_configs, station_configs, [], dist_helper, strategy=args.strategy)
 
     if not task_point_info.empty:
         valid_tasks = []

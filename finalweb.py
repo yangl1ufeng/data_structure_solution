@@ -24,6 +24,23 @@ st.set_page_config(
     layout="wide"
 )
 
+with st.sidebar:
+    st.header("⚙️ 仿真参数设置")
+    # 将 max_value 改为 100，并绑定 key 到 session_state 以保持页面数据同步
+    num_vehicles = st.slider("车队规模 (车辆数)", min_value=1, max_value=100, value=3, key="num_vehicles_slider")
+    
+    # --- 新增：算法策略选择器 ---
+    strategy_mapping = {
+        "全局最优 (Gurobi MILP)": "gurobi",
+        "最近任务优先 (启发式)": "nearest",
+        "最大载重优先 (启发式)": "largest"
+    }
+    selected_strategy_label = st.selectbox(
+        "调度策略", 
+        options=list(strategy_mapping.keys())
+    )
+    selected_strategy = strategy_mapping[selected_strategy_label]
+
 # 状态管理初始化
 if "center" not in st.session_state:
     st.session_state["center"] = [31.2304, 121.4737]
@@ -41,7 +58,8 @@ if "current_stage" not in st.session_state:
     st.session_state.current_stage = "setup"  # setup, processing, visualization
 if "auto_simulation_running" not in st.session_state:
     st.session_state.auto_simulation_running = False
-if "num_vehicles" not in st.session_state:         # <--- 新增状态
+# 这里可以将 num_vehicles 的初始值指向滑块的设定值
+if "num_vehicles" not in st.session_state:         
     st.session_state.num_vehicles = 3
 
 class SimulationVisualizer:
@@ -367,15 +385,15 @@ class SimulationVisualizer:
             'num_log_entries': len(self.simulation_log)
         }
 
-def run_simulation_background(progress_container, num_vehicles=3):  # <--- 增加参数
+def run_simulation_background(progress_container, num_vehicles=3, strategy="gurobi"):  # <--- 增加 strategy 参数
     """在后台运行仿真"""
     try:
         progress_bar = progress_container.progress(0)
         status_text = progress_container.text("正在运行仿真...")
         
-        # 设置Python路径并运行仿真脚本，传入自定义车辆数
+        # 设置Python路径并运行仿真脚本，传入自定义车辆数和策略
         result = subprocess.run(
-            [sys.executable, "simulation_gurobi.py", "--num_vehicles", str(num_vehicles)], # <--- 传入参数
+            [sys.executable, "simulation_gurobi.py", "--num_vehicles", str(num_vehicles), "--strategy", strategy], # <--- 传入 strategy
             capture_output=True,
             text=True,
             timeout=180  # 3分钟超时
@@ -471,6 +489,37 @@ def main():
             else:
                 st.warning("当前未添加任何点位。")
             
+            # --- 新增：随机生成任务点功能 ---
+            st.subheader("🎲 随机生成任务点")
+            st.info("提示：会自动在下方选择的计算区域内随机生成指定数量的任务点。")
+            
+            # 将 max_value 从 50 修改为 5000
+            random_num_tasks = st.number_input("设置随机生成任务点的数量", min_value=1, max_value=5000, value=5, step=1)
+            
+            if st.button("🎲 一键随机生成", use_container_width=True):
+                import random
+                # 简单定义城市的经纬度大致范围 (Lat_min, Lat_max, Lon_min, Lon_max)
+                city_bbox = {
+                    "Shanghai, China": (31.10, 31.35, 121.30, 121.60),
+                    "Guangzhou, China": (23.05, 23.25, 113.15, 113.45)
+                }
+                
+                # 获取当前在下方选择框中选定的城市
+                # 因为 city_selector 在下方定义，这里我们先临时获取 session_state 中的值，如果不存在默认使用上海
+                current_city = st.session_state.get("city_selector", "Shanghai, China")
+                bbox = city_bbox.get(current_city, city_bbox["Shanghai, China"])
+                
+                for _ in range(random_num_tasks):
+                    rand_lat = random.uniform(bbox[0], bbox[1])
+                    rand_lon = random.uniform(bbox[2], bbox[3])
+                    st.session_state["points"].append({
+                        "type": "📦 任务目标点 (Task Point)", 
+                        "latitude": rand_lat, 
+                        "longitude": rand_lon
+                    })
+                st.success(f"已在 {current_city} 随机生成 {random_num_tasks} 个任务点！")
+                st.rerun()
+
             # 路径计算
             st.subheader("🌍 路径规划")
             selected_city = st.selectbox(
@@ -593,8 +642,9 @@ def main():
         st.subheader("⚙️ 仿真参数设置")
         st.session_state.num_vehicles = st.number_input(
             "设置参与调度的车辆数量", 
-            min_value=1, max_value=20, 
-            value=st.session_state.num_vehicles, 
+            min_value=1, max_value=100, 
+            # 这里的 value 使用 slider 绑定的值或是 session_state，保持一致
+            value=st.session_state.get("num_vehicles_slider", st.session_state.num_vehicles), 
             step=1,
             help="这决定了仿真中有多少辆车可用。大车队处理任务更快，但也更耗费计算资源。"
         )
@@ -614,7 +664,8 @@ def main():
                     
                     # 步骤2: 运行仿真
                     st.info("⚙️ 步骤2/3: 运行仿真引擎...")
-                    success, log_output = run_simulation_background(progress_container, st.session_state.num_vehicles) # <--- 传入页面状态值
+                    # <--- 传入 selected_strategy
+                    success, log_output = run_simulation_background(progress_container, st.session_state.num_vehicles, selected_strategy) 
                     
                     if success:
                         # 步骤3: 解析日志
@@ -646,7 +697,8 @@ def main():
                 progress_container = st.empty()
                 
                 with st.spinner("运行仿真中..."):
-                    success, log_output = run_simulation_background(progress_container, st.session_state.num_vehicles) # <--- 传入页面状态值
+                    # <--- 传入 selected_strategy
+                    success, log_output = run_simulation_background(progress_container, st.session_state.num_vehicles, selected_strategy)
                     if success:
                         visualizer.parse_simulation_log(log_output)
                         st.success("✅ 仿真完成")
