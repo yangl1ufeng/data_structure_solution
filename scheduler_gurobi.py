@@ -22,24 +22,29 @@ class GurobiEVRPScheduler:
         self.big_M = 100000.0  # 大M法常数
 
     def solve_assignment(self, vehicles, pending_tasks, stations, dist_helper, graph):
-        # --- 新增预处理: 提前剔除无法连通的孤岛任务，根本不将其纳入数学模型 ---
+        # ---> 新增: 距离查询本地缓存字典，极大幅度提升重复查询速度
+        dist_cache = {}
+        def fast_get_dist(loc1, loc2):
+            if (loc1, loc2) in dist_cache:
+                return dist_cache[(loc1, loc2)]
+            dist = dist_helper.get_distance(loc1, loc2)
+            dist_cache[(loc1, loc2)] = dist
+            return dist
+
+        # --- 预处理: 提前剔除无法连通的孤岛任务，根本不将其纳入数学模型 ---
         reachable_tasks = []
         for t in pending_tasks:
             is_reachable = False
             for k in vehicles:
-                dist_to_task = dist_helper.get_distance(k.current_location, t.location_node)
-                # 只要网路中至少有一辆车能开到这个点，它就不是死点
+                # 使用缓存函数
+                dist_to_task = fast_get_dist(k.current_location, t.location_node)
                 if dist_to_task is not None:
                     is_reachable = True
                     break
             if is_reachable:
                 reachable_tasks.append(t)
-            # 如果不可达，连 print 占位都不需要提供，直接在系统层面“蒸发”这个任务
         
-        # 覆盖为清洗后的安全任务集
         pending_tasks = reachable_tasks
-        
-        # 如果所有任务都是死点（或本来就没任务），直接返回空分配，省去求解
         if not pending_tasks:
             return {str(k.id): [] for k in vehicles}
 
@@ -47,18 +52,18 @@ class GurobiEVRPScheduler:
         model.setParam('OutputFlag', 0)
         model.setParam('TimeLimit', self.time_limit)
         model.setParam('MIPGap', self.gap_tolerance)
+        # 推荐为大规模问题增加的参数
+        model.setParam('MIPFocus', 1)
 
         # -----------------------------
         # 1. 图节点构建与预处理剪枝
         # -----------------------------
-        # 使用唯一标识符取代物理节点ID，避免因拆分任务同址导致 Gurobi 变量重复
         task_nodes = [f"TASK_{t.id}" for t in pending_tasks]
         station_nodes = [f"STATION_{s.id}" for s in stations]
         
         V_tasks = {f"TASK_{t.id}": t for t in pending_tasks}
         V_stations = {f"STATION_{s.id}": s for s in stations}
         
-        # 建立 虚拟ID -> 物理坐标 的映射字典，用于测距
         location_map = {}
         for t in pending_tasks: location_map[f"TASK_{t.id}"] = t.location_node
         for s in stations: location_map[f"STATION_{s.id}"] = s.location_node
@@ -66,6 +71,7 @@ class GurobiEVRPScheduler:
             location_map[f"START_{k.id}"] = k.current_location
             location_map[f"END_{k.id}"] = k.depot_node
         
+        # --- 步骤 1.5: 构建真实的合法边 (剔除无路径的死点) ---
         valid_edges = []
         for k in vehicles:
             start_k = f"START_{k.id}"
@@ -77,35 +83,66 @@ class GurobiEVRPScheduler:
                 for j in V_k:
                     if i == j or i == end_k or j == start_k:
                         continue
+                        
+                    loc_i = location_map[i]
+                    loc_j = location_map[j]
+                    
+                    dist_val = fast_get_dist(loc_i, loc_j)
+                    if dist_val is None:
+                        if i == start_k and j == end_k:
+                            valid_edges.append((i, j, k.id))
+                        continue
+                        
                     valid_edges.append((i, j, k.id))
                     
-        # 兜底去重
         valid_edges = list(set(valid_edges))
 
         # -----------------------------
-        # 2. 决策变量定义
+        # 2. 声明字典并初始化决策变量
         # -----------------------------
-        # x[i, j, k]: 车辆 k 是否驶过边 (i, j)
-        x = model.addVars(valid_edges, vtype=GRB.BINARY, name="x")
-        
-        # y[i]: 任务 i 是否被完成 (允许弃单惩罚)
-        y = model.addVars(task_nodes, vtype=GRB.BINARY, name="y")
+        x = {}
+        y = {}
+        t = {}  
+        b = {}
+        u = {}
+        charge_amt = {}
 
-        # 连续流变量 (针对每个节点和每辆车)
-        t = {} # 到达时间 time
-        b = {} # 离开电量 battery
-        u = {} # 剩余载重 payload
-        charge_amt = {} # 充电量
-        
+        # 声明全局弃单变量 y
+        for task_node in task_nodes:
+            y[task_node] = model.addVar(vtype=GRB.BINARY, name=f"y_{task_node}")
+            
+        # 声明边访问变量 x
+        for i, j, k_id in valid_edges:
+            x[i, j, k_id] = model.addVar(vtype=GRB.BINARY, name=f"x_{i}_{j}_{k_id}")
+
         for k in vehicles:
             start_k = f"START_{k.id}"
             end_k = f"END_{k.id}"
+            
             V_k = [start_k, end_k] + task_nodes + station_nodes
             
             for i in V_k:
+                # 计算“逃生”到最近充电站的最短距离
+                min_escape_dist = 0.0
+                if i in task_nodes:
+                    min_escape = float('inf')
+                    for s in station_nodes:
+                        d_s = fast_get_dist(location_map[i], location_map[s])
+                        if d_s is not None and d_s < min_escape:
+                            min_escape = d_s
+                    # 如果周围没充电站，则要求至少能开回仓库
+                    if min_escape == float('inf'):
+                        d_d = fast_get_dist(location_map[i], location_map[end_k])
+                        min_escape = d_d if d_d is not None else 0.0
+                    min_escape_dist = min_escape
+                
+                # 当前节点到最近充电站所需的电量 (安全底线)
+                escape_energy = min_escape_dist * k.consumption_rate_dist
+                
                 t[i, k.id] = model.addVar(vtype=GRB.CONTINUOUS, lb=0.0, name=f"t_{i}_{k.id}")
-                b[i, k.id] = model.addVar(vtype=GRB.CONTINUOUS, lb=0.0, ub=k.max_battery, name=f"b_{i}_{k.id}")
+                b[i, k.id] = model.addVar(vtype=GRB.CONTINUOUS, lb=escape_energy, ub=k.max_battery, name=f"b_{i}_{k.id}")
                 u[i, k.id] = model.addVar(vtype=GRB.CONTINUOUS, lb=0.0, ub=k.max_payload, name=f"u_{i}_{k.id}")
+                
                 if i in station_nodes:
                     charge_amt[i, k.id] = model.addVar(vtype=GRB.CONTINUOUS, lb=0.0, ub=k.max_battery, name=f"charge_{i}_{k.id}")
 
@@ -144,7 +181,7 @@ class GurobiEVRPScheduler:
                 loc_i = location_map[i]
                 loc_j = location_map[j]
                 
-                dist_val = dist_helper.get_distance(loc_i, loc_j)
+                dist_val = fast_get_dist(loc_i, loc_j)
                 dist = 10000.0 if dist_val is None else dist_val
                 
                 travel_time = (dist / 1000.0) / k.speed_kmh * 60.0 # 分钟
@@ -197,7 +234,7 @@ class GurobiEVRPScheduler:
         
         for i, j, k_id in valid_edges:
             # 🔥 修复：目标函数中也只需通过映射表换取物理坐标
-            dist_val = dist_helper.get_distance(location_map[i], location_map[j])
+            dist_val = fast_get_dist(location_map[i], location_map[j])
             dist = 0 if dist_val is None else dist_val
             obj_expr -= x[i, j, k_id] * dist * 0.01 # 减去行驶距离惩罚
             
