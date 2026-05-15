@@ -147,32 +147,35 @@ def create_distance_matrix(graph, snapped_points_df):
     else:
         dist_matrix_raw = np.array([])
 
-    # 5. 初始化最终输出的 DataFrame 矩阵
+    # 5. 用 numpy 向量化操作取代 pandas 嵌套循环
     num_points = len(snapped_points_df)
-    dist_matrix = pd.DataFrame(index=snapped_points_df.index, columns=snapped_points_df.index, dtype=float)
-
     # 建立映射：valid_indices 里的第 i 个元素，在 dist_matrix_raw 中对应第 i 行
     valid_idx_to_row = {idx: i for i, idx in enumerate(valid_indices)}
 
-    # 6. 从庞大的全图计算结果中，精准抠出我们需要的那 N x N 个结果
-    for i in range(num_points):
-        for j in range(num_points):
-            idx_i = target_indices[i]
-            idx_j = target_indices[j]
-            
-            if i == j:
-                dist_matrix.iloc[i, j] = 0.0
-            elif idx_i == -1 or idx_j == -1:
-                # 如果点根本不在图里，直接判为不可达
-                dist_matrix.iloc[i, j] = float('inf')
-            else:
-                # 去 raw 矩阵中取值
-                row_in_raw = valid_idx_to_row[idx_i]
-                dist = dist_matrix_raw[row_in_raw, idx_j]
-                
-                # 处理无穷大 (np.inf) 转为 Python 的 float('inf')
-                dist_matrix.iloc[i, j] = dist if not np.isinf(dist) else float('inf')
+    # 预构建 (num_points x num_points) 的 numpy 数组
+    result_np = np.full((num_points, num_points), np.inf, dtype=float)
+    np.fill_diagonal(result_np, 0.0)
 
+    for i in range(num_points):
+        idx_i = target_indices[i]
+        if idx_i == -1:
+            continue
+        row_in_raw = valid_idx_to_row.get(idx_i)
+        if row_in_raw is None:
+            continue
+        # 提取整行距离并直接赋值（向量化）
+        row_data = dist_matrix_raw[row_in_raw, :]
+        for j in range(num_points):
+            if i == j:
+                continue
+            idx_j = target_indices[j]
+            if idx_j == -1:
+                continue
+            d = row_data[idx_j]
+            if not np.isinf(d):
+                result_np[i, j] = d
+
+    dist_matrix = pd.DataFrame(result_np, index=snapped_points_df.index, columns=snapped_points_df.index)
     print(f"[OK] 距离矩阵 ({num_points} x {num_points}) 生成完毕。")
     return dist_matrix
 

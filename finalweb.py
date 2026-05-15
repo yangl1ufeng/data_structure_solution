@@ -148,7 +148,7 @@ class SimulationVisualizer:
             
             for line_idx, line in enumerate(lines):
                 # 提取时间信息
-                time_match = re.search(r'--- 时间: (\d+) 分钟 ---', line)
+                time_match = re.search(r'--- 时间: (\d+) 分钟', line)
                 if time_match:
                     current_time = int(time_match.group(1))
                     continue
