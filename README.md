@@ -1,7 +1,60 @@
 # data_structure_solution
 # 🚛 新能源物流车队协同调度系统
 
-基于 Gurobi 优化算法的智能物流调度仿真平台，支持动态任务分配、协同运输、充电站调度等功能。
+本项目是一个集成 Web 可视化、混合整数线性规划（MILP）与启发式调度算法的新能源物流车队路径规划与派单仿真系统。
+
+## 🌟 核心功能
+
+* **多算法调度引擎**：
+  * **全局最优 (Gurobi)**：基于 MILP 模型，带有严格的时间窗、电量流平衡与载重约束，适用于中小型规模的精确求解。
+  * **启发式贪心算法**：支持“距离最近优先”与“最大载重优先”，内置智能电量中转机制（前往任务点 + 寻找最近充电站），可毫秒级处理上千个任务的大规模调度。
+* **大规模仿真支持**：基于字典缓存机制 (Path Cache) 优化路网测距查询，极大地提升了建图与调度计算速度。
+* **交互式 Web UI (Streamlit + Folium)**：
+  * 支持在所选城市区域（如上海、广州）一键随机生成最高 5000 个任务点。
+  * 支持自定义车队规模（最高 100 辆车）与基础参数调节。
+  * 动态地图仿真回放 (TimestampedGeoJson)，以专属颜色、醒目边界及动态提示框直观展示每辆车的运行轨迹、载荷与电量状态。
+* **智能电量管理**：实时预估耗电量，避免车辆抛锚；在电量不足时自动规划前往最近的空闲充电站进行补电，并无缝衔接后续任务。
+
+## ⚙️ 环境依赖
+
+* Python 3.8+
+* [Streamlit](https://streamlit.io/)
+* [Folium](https://python-visualization.github.io/folium/) / streamlit-folium
+* [NetworkX](https://networkx.org/)
+* [Gurobi Optimizer](https://www.gurobi.com/) (可能需配置有效许可证 `@gurobi.lic` 以解锁大规模变量限制)
+* Pandas / Numpy
+
+## 🚀 快速启动
+
+1. **安装依赖**：
+   在终端中运行以下命令安装必备库：
+   ```bash
+   pip install streamlit folium streamlit-folium networkx gurobipy pandas numpy
+   ```
+
+2. **配置 Gurobi 许可证**：
+   如果你需要使用 Gurobi 求解大规模任务，请将申请到的 `gurobi.lic` 文件放置在项目根目录 `d:\code\python_code\solution_web\local\` 下。
+
+3. **运行系统**：
+   在终端中启动 Streamlit 服务：
+   ```bash
+   cd d:\code\python_code\solution_web\local
+   streamlit run finalweb.py
+   ```
+
+4. **系统使用流程**：
+   * 在左侧边栏配置**仿真参数**（车辆数、调度策略等）。
+   * 在页面中选择目标城市，点击**🎲 一键随机生成**或手动添加任务节点。
+   * 点击**🚀 计算最短路径**进行路网贴合与距离初始化。
+   * 点击**一键自动化执行**或**运行仿真**，等待后台引擎计算完毕并在右侧加载可视化回放动画。
+
+## 📁 主要文件结构
+
+* `finalweb.py`: Streamlit 前端主程序，负责 UI 渲染、地图可视化与后台进程调度。
+* `simulation_gurobi.py`: 仿真核心引擎，管理时间轴、车辆状态流转以及日志生成。
+* `scheduler_gurobi.py`: 基于 Gurobi 的 MILP 数学规划求解器。
+* `scheduler_greedy.py`: 基于启发式规则的快速调度器。
+* `gurobi.lic`: (需用户提供) Gurobi 求解器解锁
 
 ## 📋 项目概览
 

@@ -3,6 +3,8 @@ import osmnx as ox
 import networkx as nx
 import pandas as pd
 import json
+import scipy.sparse.csgraph as csgraph
+import numpy as np
 
 # --- 全局配置与缓存 ---
 # 缓存已计算的路径，避免重复计算。格式: {(source_node, target_node): {"length": 123, "path": [...]}}
@@ -93,9 +95,13 @@ def get_shortest_path(graph, source_node, target_node, weight='length'):
         print(f"警告: 从节点 {source_node} 到 {target_node} 不存在路径。")
         return None
 
+# ============================================================
+# 修改位置 2：完全替换原有的 create_distance_matrix 函数
+# ============================================================
 def create_distance_matrix(graph, snapped_points_df):
     """
     生成所有点位之间的距离矩阵。
+    (升级版：使用 SciPy 的底层 C 语言稀疏矩阵进行批量计算，将 O(N^2) 的耗时降至秒级)
 
     Args:
         graph (networkx.MultiDiGraph): 路网图。
@@ -104,31 +110,70 @@ def create_distance_matrix(graph, snapped_points_df):
     Returns:
         pd.DataFrame: 距离矩阵，索引和列都是点位的原始索引。
     """
-    print("正在生成距离矩阵...")
+    print("正在生成距离矩阵 (基于 SciPy 引擎加速，请稍候)...")
+    
+    # 1. 建立 NetworkX 节点 ID 与 连续整数索引 的映射字典
+    nodes_list = list(graph.nodes())
+    node_to_idx = {node: i for i, node in enumerate(nodes_list)}
+    
+    # 2. 将图转换为 SciPy 稀疏矩阵 (默认使用 'length' 作为距离权重)
+    # 这一步只需执行一次，耗时通常在 1~3 秒
+    adj_matrix = nx.to_scipy_sparse_array(graph, nodelist=nodes_list, weight='length')
+    
+    # 3. 获取所有任务点、充电站、仓库的节点 ID
+    target_node_ids = snapped_points_df['node_id'].tolist()
+    
+    # 将节点 ID 转换为对应的连续整数索引
+    target_indices = []
+    for node in target_node_ids:
+        if node in node_to_idx:
+            target_indices.append(node_to_idx[node])
+        else:
+            print(f"[WARNING] 节点 {node} 不在路网图中，将其距离设为无穷大。")
+            target_indices.append(-1)
+            
+    # 过滤出有效的索引交给 SciPy 计算
+    valid_indices = [idx for idx in target_indices if idx != -1]
+    
+    # 4. 核心加速点：调用 C++ 底层实现的批量单源 Dijkstra 算法
+    if valid_indices:
+        # 这里的返回结果包含了 valid_indices 中每个点到全图所有点的最短距离
+        dist_matrix_raw = csgraph.shortest_path(
+            csgraph=adj_matrix, 
+            method='D',          # 使用 Dijkstra 算法
+            directed=True,       # 考虑道路的方向性 (单行道)
+            indices=valid_indices 
+        )
+    else:
+        dist_matrix_raw = np.array([])
+
+    # 5. 初始化最终输出的 DataFrame 矩阵
     num_points = len(snapped_points_df)
-    # 初始化一个空的 DataFrame
     dist_matrix = pd.DataFrame(index=snapped_points_df.index, columns=snapped_points_df.index, dtype=float)
 
-    node_ids = snapped_points_df['node_id']
+    # 建立映射：valid_indices 里的第 i 个元素，在 dist_matrix_raw 中对应第 i 行
+    valid_idx_to_row = {idx: i for i, idx in enumerate(valid_indices)}
 
+    # 6. 从庞大的全图计算结果中，精准抠出我们需要的那 N x N 个结果
     for i in range(num_points):
         for j in range(num_points):
+            idx_i = target_indices[i]
+            idx_j = target_indices[j]
+            
             if i == j:
                 dist_matrix.iloc[i, j] = 0.0
-                continue
-
-            source_node = node_ids.iloc[i]
-            target_node = node_ids.iloc[j]
-            
-            path_info = get_shortest_path(graph, source_node, target_node)
-            
-            if path_info:
-                dist_matrix.iloc[i, j] = path_info['length']
-            else:
-                # 如果不可达，可以设置为无穷大或一个标记值
+            elif idx_i == -1 or idx_j == -1:
+                # 如果点根本不在图里，直接判为不可达
                 dist_matrix.iloc[i, j] = float('inf')
-    
-    print("距离矩阵生成完毕。")
+            else:
+                # 去 raw 矩阵中取值
+                row_in_raw = valid_idx_to_row[idx_i]
+                dist = dist_matrix_raw[row_in_raw, idx_j]
+                
+                # 处理无穷大 (np.inf) 转为 Python 的 float('inf')
+                dist_matrix.iloc[i, j] = dist if not np.isinf(dist) else float('inf')
+
+    print(f"[OK] 距离矩阵 ({num_points} x {num_points}) 生成完毕。")
     return dist_matrix
 
 def get_path_geometry(graph, node_path):

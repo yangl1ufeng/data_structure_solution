@@ -36,10 +36,22 @@ with st.sidebar:
         "最大载重优先 (启发式)": "largest"
     }
     selected_strategy_label = st.selectbox(
-        "调度策略", 
+        "调度策略",
         options=list(strategy_mapping.keys())
     )
     selected_strategy = strategy_mapping[selected_strategy_label]
+
+    # 仿真模式选择
+    mode_mapping = {
+        "动态调度 (逐步释放任务)": "dynamic",
+        "上帝视角 (全局最优规划)": "static"
+    }
+    selected_mode_label = st.selectbox(
+        "仿真模式",
+        options=list(mode_mapping.keys()),
+        help="动态调度: 任务随时间逐步出现，实时分配。上帝视角: 所有任务在t=0一次性释放，Gurobi全局最优规划。"
+    )
+    selected_mode = mode_mapping[selected_mode_label]
 
 # 状态管理初始化
 if "center" not in st.session_state:
@@ -299,6 +311,11 @@ class SimulationVisualizer:
                 
                 battery_percent = vehicle_data['battery']
                 
+                # --- 新增: 车辆专属填充颜色 (10色循环) ---
+                distinct_colors = ["#E63946", "#2A9D8F", "#E9C46A", "#F4A261", "#E76F51", 
+                                   "#8ECAE6", "#219EBC", "#023047", "#FFB703", "#FB8500"]
+                v_color = distinct_colors[vehicle_id % len(distinct_colors)]
+                
                 feature = {
                     "type": "Feature",
                     "geometry": {
@@ -313,6 +330,7 @@ class SimulationVisualizer:
                             <b>状态:</b> {status_info['display']}<br>
                             <b>电量:</b> {battery_percent:.1f} kWh<br>
                             <b>计划:</b> {vehicle_data['plan']} 个任务<br>
+                            <b>车身颜色:</b> <span style='color:{v_color};'>████</span><br>
                             <b>位置:</b> {vehicle_data['location']}<br>
                             <b>时间:</b> {time_minute} 分钟
                         </div>
@@ -320,11 +338,11 @@ class SimulationVisualizer:
                         "tooltip": f"车辆{vehicle_id} | {status_info['display']} | {battery_percent:.0f}kWh",
                         "icon": "circle",
                         "iconstyle": {
-                            "fillColor": status_info['color'],
-                            "color": "black",
-                            "weight": 2,
-                            "fillOpacity": 0.8,
-                            "radius": 10 + vehicle_id * 2
+                            "fillColor": v_color,          # 内部填充色：车辆专属颜色
+                            "color": status_info['color'], # 外部描边色：状态颜色
+                            "weight": 3,                   # 加粗描边，让状态颜色更醒目
+                            "fillOpacity": 0.9,
+                            "radius": 12                   # 固定大小，不再随车辆ID递增
                         }
                     }
                 }
@@ -385,18 +403,21 @@ class SimulationVisualizer:
             'num_log_entries': len(self.simulation_log)
         }
 
-def run_simulation_background(progress_container, num_vehicles=3, strategy="gurobi"):  # <--- 增加 strategy 参数
+def run_simulation_background(progress_container, num_vehicles=3, strategy="gurobi", mode="dynamic"):
     """在后台运行仿真"""
     try:
         progress_bar = progress_container.progress(0)
         status_text = progress_container.text("正在运行仿真...")
-        
-        # 设置Python路径并运行仿真脚本，传入自定义车辆数和策略
+
+        cmd = [sys.executable, "simulation_gurobi.py", "--num_vehicles", str(num_vehicles), "--strategy", strategy, "--mode", mode]
+        # 静态模式设置更长的超时时间（Gurobi需要更多求解时间）
+        timeout = 600 if mode == "static" else 180
+
         result = subprocess.run(
-            [sys.executable, "simulation_gurobi.py", "--num_vehicles", str(num_vehicles), "--strategy", strategy], # <--- 传入 strategy
+            cmd,
             capture_output=True,
             text=True,
-            timeout=180  # 3分钟超时
+            timeout=timeout
         )
         
         progress_bar.progress(80)
@@ -665,7 +686,7 @@ def main():
                     # 步骤2: 运行仿真
                     st.info("⚙️ 步骤2/3: 运行仿真引擎...")
                     # <--- 传入 selected_strategy
-                    success, log_output = run_simulation_background(progress_container, st.session_state.num_vehicles, selected_strategy) 
+                    success, log_output = run_simulation_background(progress_container, st.session_state.num_vehicles, selected_strategy, selected_mode)
                     
                     if success:
                         # 步骤3: 解析日志
@@ -698,7 +719,7 @@ def main():
                 
                 with st.spinner("运行仿真中..."):
                     # <--- 传入 selected_strategy
-                    success, log_output = run_simulation_background(progress_container, st.session_state.num_vehicles, selected_strategy)
+                    success, log_output = run_simulation_background(progress_container, st.session_state.num_vehicles, selected_strategy, selected_mode)
                     if success:
                         visualizer.parse_simulation_log(log_output)
                         st.success("✅ 仿真完成")
