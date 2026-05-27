@@ -17,8 +17,12 @@ import os
 import argparse  
 
 # --- 引入调度器 ---
-from scheduler_gurobi import GurobiEVRPScheduler 
+from scheduler_gurobi import GurobiEVRPScheduler
 from scheduler_greedy import GreedyEVRPScheduler  # <--- 引入独立的贪心调度器
+from scheduler_genetic import GeneticEVRPScheduler    # 遗传算法（元启发式）
+from scheduler_rl import QLearningEVRPScheduler      # Q-Learning（强化学习）
+from scheduler_auction import AuctionEVRPScheduler    # 拍卖竞标（多智能体）
+from scheduler_sa import SimulatedAnnealingScheduler  # 模拟退火（元启发式）
 
 # --- 0. 距离辅助类 ---
 class DistanceHelper:
@@ -414,13 +418,37 @@ class Simulator:
             print("[INFO] 已加载静态全局最优模式: Gurobi 一次性全局规划 (求解时限30秒)")
         elif strategy == "gurobi":
             self.scheduler = GurobiEVRPScheduler(time_limit=5)
-            print("[INFO] 已加载高级算法模块: Gurobi 全局最优调度")
+            print("[INFO] 已加载高级算法模块: Gurobi 全局最优调度 (MILP)")
         elif strategy == "nearest":
             self.scheduler = GreedyEVRPScheduler(strategy_type="nearest")
             print("[INFO] 已加载基础算法模块: 启发式贪心调度 (距离最近优先)")
         elif strategy == "largest":
             self.scheduler = GreedyEVRPScheduler(strategy_type="largest")
             print("[INFO] 已加载基础算法模块: 启发式贪心调度 (最大载重优先)")
+        elif strategy == "genetic":
+            self.scheduler = GeneticEVRPScheduler(
+                population_size=60, generations=80,
+                crossover_rate=0.85, mutation_rate=0.15,
+                time_limit=10
+            )
+            print("[INFO] 已加载进阶算法模块: 遗传算法调度 (元启发式)")
+        elif strategy == "rl":
+            self.scheduler = QLearningEVRPScheduler(
+                learning_rate=0.1, discount_factor=0.9,
+                epsilon=0.2, time_limit=10
+            )
+            print("[INFO] 已加载进阶算法模块: Q-Learning强化学习调度")
+        elif strategy == "auction":
+            self.scheduler = AuctionEVRPScheduler(
+                num_rounds=5, time_limit=10
+            )
+            print("[INFO] 已加载进阶算法模块: 拍卖竞标多智能体调度")
+        elif strategy == "sa":
+            self.scheduler = SimulatedAnnealingScheduler(
+                initial_temp=1000.0, cooling_rate=0.95,
+                iterations_per_temp=50, time_limit=10
+            )
+            print("[INFO] 已加载进阶算法模块: 模拟退火调度 (元启发式)")
         else:
             self.scheduler = GurobiEVRPScheduler(time_limit=5)
 
@@ -700,7 +728,9 @@ class Simulator:
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="EVRP Simulation")
     parser.add_argument('--num_vehicles', type=int, default=3, help='自定义车辆数量')
-    parser.add_argument('--strategy', type=str, default='gurobi', choices=['gurobi', 'nearest', 'largest'], help='选择任务调度策略')
+    parser.add_argument('--strategy', type=str, default='gurobi',
+                        choices=['gurobi', 'nearest', 'largest', 'genetic', 'rl', 'auction', 'sa'],
+                        help='选择任务调度策略')
     parser.add_argument('--mode', type=str, default='dynamic', choices=['dynamic', 'static'], help='仿真模式: dynamic=逐步释放任务动态调度, static=上帝视角全局最优')
     args = parser.parse_args()
 

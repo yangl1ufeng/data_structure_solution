@@ -33,7 +33,11 @@ with st.sidebar:
     strategy_mapping = {
         "全局最优 (Gurobi MILP)": "gurobi",
         "最近任务优先 (启发式)": "nearest",
-        "最大载重优先 (启发式)": "largest"
+        "最大载重优先 (启发式)": "largest",
+        "🧬 遗传算法 (元启发式)": "genetic",
+        "🧠 Q-Learning (强化学习)": "rl",
+        "🤝 拍卖竞标 (多智能体)": "auction",
+        "🔥 模拟退火 (元启发式)": "sa"
     }
     selected_strategy_label = st.selectbox(
         "调度策略",

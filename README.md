@@ -7,7 +7,11 @@
 
 * **多算法调度引擎**：
   * **全局最优 (Gurobi)**：基于 MILP 模型，带有严格的时间窗、电量流平衡与载重约束，适用于中小型规模的精确求解。
-  * **启发式贪心算法**：支持“距离最近优先”与“最大载重优先”，内置智能电量中转机制（前往任务点 + 寻找最近充电站），可毫秒级处理上千个任务的大规模调度。
+  * **启发式贪心算法**：支持”距离最近优先”与”最大载重优先”，内置智能电量中转机制（前往任务点 + 寻找最近充电站），可毫秒级处理上千个任务的大规模调度。
+  * **遗传算法 (GA)**：元启发式方法，任务排列染色体 + 贪心分裂解码器，锦标赛选择 + OX交叉 + 多策略变异，适合大规模优化。
+  * **Q-Learning 强化学习**：离散化状态空间（电量/距离/重量/紧急度），ε-greedy 探索策略，Q表持久化与启发式初始化，自主学习调度策略。
+  * **拍卖竞标多智能体**：每辆车作为独立智能体，基于成本（距离+电池风险+时间窗+载重利用率）出价竞标，多轮迭代 + 冲突解决。
+  * **模拟退火 (SA)**：元启发式方法，5种邻域操作（交换/重排/重分配/增删充电站），Metropolis 接受准则，从贪心初始解出发全局搜索优化。
 * **大规模仿真支持**：基于字典缓存机制 (Path Cache) 优化路网测距查询，极大地提升了建图与调度计算速度。
 * **交互式 Web UI (Streamlit + Folium)**：
   * 支持在所选城市区域（如上海、广州）一键随机生成最高 5000 个任务点。
@@ -54,7 +58,11 @@
 * `simulation_gurobi.py`: 仿真核心引擎，管理时间轴、车辆状态流转以及日志生成。
 * `scheduler_gurobi.py`: 基于 Gurobi 的 MILP 数学规划求解器。
 * `scheduler_greedy.py`: 基于启发式规则的快速调度器。
-* `gurobi.lic`: (需用户提供) Gurobi 求解器解锁
+* `scheduler_genetic.py`: 基于遗传算法 (GA) 的元启发式调度器。
+* `scheduler_rl.py`: 基于 Q-Learning 的强化学习调度器。
+* `scheduler_auction.py`: 基于拍卖竞标的多智能体调度器。
+* `scheduler_sa.py`: 基于模拟退火 (SA) 的元启发式调度器。
+* `gurobi.lic`: (需用户提供) Gurobi 求解器许可证
 
 ## 📋 项目概览
 
@@ -173,8 +181,15 @@ local/
 ├── data/                          # 数据文件夹（自动生成）
 │   ├── snapped_points.csv         # 地点坐标数据
 │   └── distance_matrix.csv        # 距离矩阵
+├── cache/                         # 缓存文件夹
+│   └── q_table.json               # Q-Learning Q表持久化
 ├── simulation_gurobi.py           # 仿真引擎
-├── scheduler_gurobi.py            # Gurobi调度器
+├── scheduler_gurobi.py            # Gurobi MILP调度器
+├── scheduler_greedy.py            # 贪心启发式调度器
+├── scheduler_genetic.py           # 遗传算法调度器（元启发式）
+├── scheduler_rl.py                # Q-Learning调度器（强化学习）
+├── scheduler_auction.py           # 拍卖竞标调度器（多智能体）
+├── scheduler_sa.py                # 模拟退火调度器（元启发式）
 ├── path_processor.py              # 路径处理工具
 ├── requirements.txt               # 依赖列表
 ├── README.md                      # 项目说明
@@ -227,6 +242,9 @@ streamlit run animate_vis.py
 - **协同运输**：大型任务自动拆分为多车协同
 - **智能充电**：基于电量阈值的充电决策
 - **动态调度**：实时任务分配和路径优化
+- **元启发式方法**：遗传算法 (GA) + 模拟退火 (SA) 全局搜索
+- **强化学习**：Q-Learning 自主学习调度策略
+- **多智能体**：拍卖竞标去中心化决策
 
 ### 可视化功能
 - **动态地图**：实时显示车辆位置和移动轨迹
