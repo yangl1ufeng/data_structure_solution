@@ -457,7 +457,7 @@ def run_simulation_background(progress_container, num_vehicles=3, strategy="guro
         progress_bar = progress_container.progress(0)
         status_text = progress_container.text("正在运行仿真...")
 
-        cmd = [sys.executable, "simulation_gurobi.py", "--num_vehicles", str(num_vehicles), "--strategy", strategy, "--mode", mode]
+        cmd = [sys.executable, "simulation.py", "--num_vehicles", str(num_vehicles), "--strategy", strategy, "--mode", mode]
         # 静态模式设置更长的超时时间（全局优化算法需要更多求解时间）
         timeout = 600 if mode == "static" else 180
 

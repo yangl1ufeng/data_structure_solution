@@ -55,7 +55,7 @@
 ## 📁 主要文件结构
 
 * `finalweb.py`: Streamlit 前端主程序，负责 UI 渲染、地图可视化与后台进程调度。
-* `simulation_gurobi.py`: 仿真核心引擎，管理时间轴、车辆状态流转以及日志生成。
+* `simulation.py`: 仿真核心引擎，管理时间轴、车辆状态流转以及日志生成。
 * `scheduler_gurobi.py`: 基于 Gurobi 的 MILP 数学规划求解器。
 * `scheduler_greedy.py`: 基于启发式规则的快速调度器。
 * `scheduler_genetic.py`: 基于遗传算法 (GA) 的元启发式调度器。
@@ -183,7 +183,7 @@ local/
 │   └── distance_matrix.csv        # 距离矩阵
 ├── cache/                         # 缓存文件夹
 │   └── q_table.json               # Q-Learning Q表持久化
-├── simulation_gurobi.py           # 仿真引擎
+├── simulation.py           # 仿真引擎
 ├── scheduler_gurobi.py            # Gurobi MILP调度器
 ├── scheduler_greedy.py            # 贪心启发式调度器
 ├── scheduler_genetic.py           # 遗传算法调度器（元启发式）
@@ -210,11 +210,11 @@ local/
 .venv\Scripts\activate  # Windows
 # source .venv/bin/activate  # macOS/Linux
 
-# 运行地图配置工具
-streamlit run testweb.py
+# 运行集成系统（含节点配置功能）
+streamlit run finalweb.py
 ```
 
-在打开的网页中：
+在打开的网页中，切换到"节点配置"标签页：
 1. 选择节点类型（仓库、充电站、任务点）
 2. 在地图上点击添加节点
 3. 点击"处理路径数据"生成所需文件
@@ -223,14 +223,14 @@ streamlit run testweb.py
 
 ```bash
 # 运行核心仿真引擎
-python simulation_gurobi.py
+python simulation.py
 ```
 
 ### 4. 启动可视化界面
 
 ```bash
 # 运行可视化系统
-streamlit run animate_vis.py
+streamlit run finalweb.py
 ```
 
 然后在浏览器中访问 `http://localhost:8501`
@@ -284,8 +284,8 @@ pip install --force-reinstall streamlit
 ```
 
 ### 数据文件缺失
-1. 运行 `streamlit run testweb.py`
-2. 在地图上选择节点
+1. 运行 `streamlit run finalweb.py`
+2. 切换到"节点配置"标签页，在地图上选择节点
 3. 点击"处理路径数据"按钮
 4. 等待生成完成
 
