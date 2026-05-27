@@ -412,45 +412,74 @@ class Simulator:
         self.tasks = {t.id: t for t in initial_tasks}
         self.task_event_queue = []
 
-        # 静态模式强制使用 Gurobi 并给予更长的求解时间
-        if mode == "static":
-            self.scheduler = GurobiEVRPScheduler(time_limit=30, gap_tolerance=0.03)
-            print("[INFO] 已加载静态全局最优模式: Gurobi 一次性全局规划 (求解时限30秒)")
-        elif strategy == "gurobi":
-            self.scheduler = GurobiEVRPScheduler(time_limit=5)
-            print("[INFO] 已加载高级算法模块: Gurobi 全局最优调度 (MILP)")
-        elif strategy == "nearest":
-            self.scheduler = GreedyEVRPScheduler(strategy_type="nearest")
-            print("[INFO] 已加载基础算法模块: 启发式贪心调度 (距离最近优先)")
-        elif strategy == "largest":
-            self.scheduler = GreedyEVRPScheduler(strategy_type="largest")
-            print("[INFO] 已加载基础算法模块: 启发式贪心调度 (最大载重优先)")
-        elif strategy == "genetic":
-            self.scheduler = GeneticEVRPScheduler(
-                population_size=60, generations=80,
-                crossover_rate=0.85, mutation_rate=0.15,
-                time_limit=10
-            )
-            print("[INFO] 已加载进阶算法模块: 遗传算法调度 (元启发式)")
-        elif strategy == "rl":
-            self.scheduler = QLearningEVRPScheduler(
-                learning_rate=0.1, discount_factor=0.9,
-                epsilon=0.2, time_limit=10
-            )
-            print("[INFO] 已加载进阶算法模块: Q-Learning强化学习调度")
-        elif strategy == "auction":
-            self.scheduler = AuctionEVRPScheduler(
-                num_rounds=5, time_limit=10
-            )
-            print("[INFO] 已加载进阶算法模块: 拍卖竞标多智能体调度")
-        elif strategy == "sa":
-            self.scheduler = SimulatedAnnealingScheduler(
-                initial_temp=1000.0, cooling_rate=0.95,
-                iterations_per_temp=50, time_limit=10
-            )
-            print("[INFO] 已加载进阶算法模块: 模拟退火调度 (元启发式)")
+        # RL 和拍卖是基于序贯决策/分布式博弈的算法，不适合上帝视角模式
+        if mode == "static" and strategy in ("rl", "auction"):
+            print(f"[WARNING] {strategy} 算法本质是序贯决策/分布式博弈，不适合上帝视角模式，已自动切换为动态调度。")
+            self.mode = "dynamic"
+
+        if self.mode == "static":
+            # 上帝视角：所有任务在 t=0 一次性释放，全局优化类算法给予更长求解时间
+            if strategy == "gurobi":
+                self.scheduler = GurobiEVRPScheduler(time_limit=30, gap_tolerance=0.03)
+                print("[INFO] 已加载上帝视角模式: Gurobi 一次性全局规划 (求解时限30秒)")
+            elif strategy == "genetic":
+                self.scheduler = GeneticEVRPScheduler(
+                    population_size=80, generations=120,
+                    crossover_rate=0.85, mutation_rate=0.15,
+                    time_limit=30
+                )
+                print("[INFO] 已加载上帝视角模式: 遗传算法一次性全局规划 (求解时限30秒)")
+            elif strategy == "sa":
+                self.scheduler = SimulatedAnnealingScheduler(
+                    initial_temp=1000.0, cooling_rate=0.95,
+                    iterations_per_temp=100, time_limit=30
+                )
+                print("[INFO] 已加载上帝视角模式: 模拟退火一次性全局规划 (求解时限30秒)")
+            elif strategy in ("nearest", "largest"):
+                stype = "nearest" if strategy == "nearest" else "largest"
+                self.scheduler = GreedyEVRPScheduler(strategy_type=stype)
+                print(f"[INFO] 已加载上帝视角模式: 贪心调度-{stype} (一次性全量分配)")
+            else:
+                self.scheduler = GurobiEVRPScheduler(time_limit=30, gap_tolerance=0.03)
+                print("[INFO] 已加载上帝视角模式: Gurobi 一次性全局规划 (求解时限30秒)")
         else:
-            self.scheduler = GurobiEVRPScheduler(time_limit=5)
+            # 动态调度：任务随时间逐步释放，所有算法使用标准时间限制
+            if strategy == "gurobi":
+                self.scheduler = GurobiEVRPScheduler(time_limit=5)
+                print("[INFO] 已加载动态调度: Gurobi 全局最优调度 (MILP)")
+            elif strategy == "nearest":
+                self.scheduler = GreedyEVRPScheduler(strategy_type="nearest")
+                print("[INFO] 已加载动态调度: 启发式贪心调度 (距离最近优先)")
+            elif strategy == "largest":
+                self.scheduler = GreedyEVRPScheduler(strategy_type="largest")
+                print("[INFO] 已加载动态调度: 启发式贪心调度 (最大载重优先)")
+            elif strategy == "genetic":
+                self.scheduler = GeneticEVRPScheduler(
+                    population_size=60, generations=80,
+                    crossover_rate=0.85, mutation_rate=0.15,
+                    time_limit=10
+                )
+                print("[INFO] 已加载动态调度: 遗传算法调度 (元启发式)")
+            elif strategy == "rl":
+                self.scheduler = QLearningEVRPScheduler(
+                    learning_rate=0.1, discount_factor=0.9,
+                    epsilon=0.2, time_limit=10
+                )
+                print("[INFO] 已加载动态调度: Q-Learning强化学习调度")
+            elif strategy == "auction":
+                self.scheduler = AuctionEVRPScheduler(
+                    num_rounds=5, time_limit=10
+                )
+                print("[INFO] 已加载动态调度: 拍卖竞标多智能体调度")
+            elif strategy == "sa":
+                self.scheduler = SimulatedAnnealingScheduler(
+                    initial_temp=1000.0, cooling_rate=0.95,
+                    iterations_per_temp=50, time_limit=10
+                )
+                print("[INFO] 已加载动态调度: 模拟退火调度 (元启发式)")
+            else:
+                self.scheduler = GurobiEVRPScheduler(time_limit=5)
+                print("[INFO] 已加载动态调度: Gurobi 全局最优调度 (MILP)")
 
     def is_simulation_finished(self):
         """检查是否所有任务都已处理完毕，且所有车辆均已空闲且无待办计划"""
@@ -834,7 +863,7 @@ if __name__ == '__main__':
 
         is_static_mode = (args.mode == "static")
         if is_static_mode:
-            print("[INFO] 静态全局最优模式: 所有任务将在时间0一次性全部释放，Gurobi进行全局最优规划。")
+            print(f"[INFO] 上帝视角模式: 所有任务在时间0一次性释放，使用 {args.strategy} 进行全局规划。")
 
         for i, node_id in enumerate(valid_tasks):
             new_task_id = i + 1

@@ -45,17 +45,61 @@ with st.sidebar:
     )
     selected_strategy = strategy_mapping[selected_strategy_label]
 
-    # 仿真模式选择
-    mode_mapping = {
-        "动态调度 (逐步释放任务)": "dynamic",
-        "上帝视角 (全局最优规划)": "static"
+    # 根据所选策略推荐最合适的仿真模式
+    strategy_recommended_mode = {
+        "gurobi": "static",
+        "genetic": "static",
+        "sa": "static",
+        "rl": "dynamic",
+        "auction": "dynamic",
+        "nearest": "dynamic",
+        "largest": "dynamic",
     }
+    recommended_mode = strategy_recommended_mode.get(selected_strategy, "dynamic")
+
+    # 仿真模式选择（推荐模式高亮标注）
+    MODE_RECOMMEND = " ✓ 推荐"
+    mode_base_options = {
+        "动态调度 (逐步释放任务)": "dynamic",
+        "上帝视角 (全局最优规划)": "static",
+    }
+    mode_mapping = {}
+    for label, value in mode_base_options.items():
+        if value == recommended_mode:
+            mode_mapping[label + MODE_RECOMMEND] = value
+        else:
+            mode_mapping[label] = value
+
+    # 当策略改变时自动预选推荐模式，用户仍可手动覆盖
+    if "last_strategy" not in st.session_state:
+        st.session_state.last_strategy = selected_strategy
+    if selected_strategy != st.session_state.last_strategy:
+        st.session_state.last_strategy = selected_strategy
+        st.session_state.mode_selector_index = 0 if recommended_mode == "dynamic" else 1
+
+    default_mode_index = st.session_state.get("mode_selector_index", 0 if recommended_mode == "dynamic" else 1)
     selected_mode_label = st.selectbox(
         "仿真模式",
         options=list(mode_mapping.keys()),
-        help="动态调度: 任务随时间逐步出现，实时分配。上帝视角: 所有任务在t=0一次性释放，Gurobi全局最优规划。"
+        index=default_mode_index,
+        help="动态调度: 任务随时间逐步出现，实时分配（适合RL/拍卖等序贯决策算法）。上帝视角: 所有任务在t=0一次性释放，全局优化类算法（Gurobi/遗传/模拟退火）进行一次性全局规划。"
     )
     selected_mode = mode_mapping[selected_mode_label]
+    # 去掉推荐标记，得到纯净的 mode 值
+    selected_mode = mode_base_options.get(selected_mode_label.replace(MODE_RECOMMEND, ""), selected_mode)
+
+    # 推荐提示
+    if recommended_mode == "static" and selected_mode != "static":
+        st.info("💡 遗传算法和模拟退火是全局优化元启发式算法，推荐使用**上帝视角**模式以获得更好的全局解。", icon="💡")
+    elif recommended_mode == "dynamic" and selected_mode != "dynamic":
+        if selected_strategy in ("rl", "auction"):
+            st.warning("⚠️ RL和拍卖算法本质是序贯决策/分布式博弈，上帝视角模式下将自动切换为动态调度。", icon="⚠️")
+        else:
+            st.info("💡 当前策略在动态模式下逐步决策即可达到较好效果。", icon="💡")
+    elif recommended_mode == "static" and selected_mode == "static":
+        st.success("✅ 当前策略非常适合上帝视角模式，将进行一次性全局规划。", icon="✅")
+    elif recommended_mode == "dynamic" and selected_mode == "dynamic":
+        st.success("✅ 当前策略非常适合动态调度模式，将随任务逐步释放实时分配。", icon="✅")
 
 # 状态管理初始化
 if "center" not in st.session_state:
@@ -414,7 +458,7 @@ def run_simulation_background(progress_container, num_vehicles=3, strategy="guro
         status_text = progress_container.text("正在运行仿真...")
 
         cmd = [sys.executable, "simulation_gurobi.py", "--num_vehicles", str(num_vehicles), "--strategy", strategy, "--mode", mode]
-        # 静态模式设置更长的超时时间（Gurobi需要更多求解时间）
+        # 静态模式设置更长的超时时间（全局优化算法需要更多求解时间）
         timeout = 600 if mode == "static" else 180
 
         result = subprocess.run(
