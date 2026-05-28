@@ -271,7 +271,9 @@ class SimulationVisualizer:
         m = folium.Map(
             location=[center_lat, center_lon],
             zoom_start=12,
-            tiles='OpenStreetMap'
+            tiles='OpenStreetMap',
+            max_zoom=18,
+            control_scale=True
         )
         
         if self.depot_location:
@@ -625,7 +627,9 @@ def main():
             m = folium.Map(
                 location=st.session_state["center"],
                 zoom_start=st.session_state["zoom"],
-                tiles="OpenStreetMap"
+                tiles="OpenStreetMap",
+                max_zoom=18,
+                control_scale=True
             )
             
             # 点位样式
@@ -655,7 +659,7 @@ def main():
                 ).add_to(m)
             
             # 显示地图并处理交互
-            map_data = st_folium(m, width='100%', height=600, key="config_map")
+            map_data = st_folium(m, width=900, height=600, key="config_map")
             
             # 处理点击事件
             if map_data and map_data["last_clicked"]:
