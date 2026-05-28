@@ -825,10 +825,6 @@ def main():
                 'num_log_entries': 0
             }
         
-        # 调试信息 - 临时添加，找出问题
-        st.write("调试信息 - status 类型:", type(status))
-        st.write("调试信息 - status 值:", status)
-        
         # 安全地检查动画准备状态
         try:
             if isinstance(status, dict):

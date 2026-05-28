@@ -168,27 +168,33 @@ class GurobiEVRPScheduler:
             in_e = [(i, j) for i, j in valid_e_list if j == tn]
             model.addConstr(gp.quicksum(x[i, j] for i, j in in_e) == y[tn])
 
-        # 迟到惩罚
-        late_vars = {}
+        # 时间窗约束：t + early - late = deadline
+        early_vars_sv = {}
+        late_vars_sv = {}
         for tn in task_nodes:
             task = V_t[tn]
+            ev = model.addVar(lb=0.0, name=f"early_{tn}")
             lv = model.addVar(lb=0.0, name=f"late_{tn}")
-            model.addConstr(lv >= t_vars[tn] - task.deadline)
-            late_vars[tn] = lv
+            model.addConstr(t_vars[tn] + ev - lv == task.deadline)
+            model.addConstr(ev <= task.deadline * y[tn])
+            early_vars_sv[tn] = ev
+            late_vars_sv[tn] = lv
 
-        # 目标函数
-        REWARD = 10000
-        DROP_PENALTY = 50000
-        LATE_RATE = 200
+        # 目标函数（与仿真引擎 _update_score 保持一致）
+        REWARD = 100
+        EARLY_RATE = 1.0
+        LATE_RATE = 2.0
         obj = gp.quicksum(y[tn] * REWARD for tn in task_nodes)
-        obj -= gp.quicksum((1 - y[tn]) * (DROP_PENALTY + V_t[tn].weight) for tn in task_nodes)
+        obj -= gp.quicksum((1 - y[tn]) * V_t[tn].weight for tn in task_nodes)
+        for tn, ev in early_vars_sv.items():
+            obj += ev * EARLY_RATE
+        for tn, lv in late_vars_sv.items():
+            obj -= lv * LATE_RATE
         for i, j in valid_e_list:
-            obj -= x[i, j] * (d_cache.get((i, j), 0) or 0) * 0.01
+            obj -= x[i, j] * (d_cache.get((i, j), 0) or 0) * 0.001
         for s_node in station_nodes:
             in_e = [(i, j) for i, j in valid_e_list if j == s_node]
-            obj -= gp.quicksum(x[i, j] for i, j in in_e) * 500
-        for tn, lv in late_vars.items():
-            obj -= lv * LATE_RATE
+            obj -= gp.quicksum(x[i, j] for i, j in in_e) * 10
         model.setObjective(obj, GRB.MAXIMIZE)
 
         try:
@@ -404,6 +410,7 @@ class GurobiEVRPScheduler:
                 model.addConstr(u[j, k.id] <= u[i, k.id] - demands_j + self.big_M * (1 - x[i, j, k.id]))
 
         # d. 任务约束：每个任务必须被一辆车访问（使用预分组边，O(1) 查找）
+        early_vars = {}
         late_vars = {}
         for task_node in task_nodes:
             incoming = edges_by_target.get(task_node, [])
@@ -412,36 +419,43 @@ class GurobiEVRPScheduler:
                 name=f"visit_{task_node}"
             )
 
-            # e. 软时间窗约束
+            # e. 软时间窗约束：t + early - late = deadline
             task = V_tasks[task_node]
             for k in vehicles:
+                early_var = model.addVar(lb=0.0, name=f"early_{task_node}_{k.id}")
                 late_var = model.addVar(lb=0.0, name=f"late_{task_node}_{k.id}")
-                model.addConstr(late_var >= t[task_node, k.id] - task.deadline)
+                model.addConstr(
+                    t[task_node, k.id] + early_var - late_var == task.deadline,
+                    name=f"timewin_{task_node}_{k.id}"
+                )
+                model.addConstr(early_var <= task.deadline * y[task_node])
+                early_vars[(task_node, k.id)] = early_var
                 late_vars[(task_node, k.id)] = late_var
 
         # -----------------------------
-        # 4. 目标函数构造
+        # 4. 目标函数构造（与仿真引擎 _update_score 保持一致）
+        #    仿真计分: score = 100 + early*1.0 - late*2.0
         # -----------------------------
-        REWARD_BASE = 10000
-        PENALTY_DROP = 50000
-        LATE_PENALTY_PER_MIN = 200
+        REWARD_BASE = 100
+        EARLY_BONUS_PER_MIN = 1.0
+        LATE_PENALTY_PER_MIN = 2.0
 
         obj_expr = gp.quicksum(y[n] * REWARD_BASE for n in task_nodes)
-        obj_expr -= gp.quicksum((1 - y[n]) * (PENALTY_DROP + V_tasks[n].weight) for n in task_nodes)
+        obj_expr -= gp.quicksum((1 - y[n]) * V_tasks[n].weight for n in task_nodes)
+        for (task_node, k_id), early_var in early_vars.items():
+            obj_expr += early_var * EARLY_BONUS_PER_MIN
+        for (task_node, k_id), late_var in late_vars.items():
+            obj_expr -= late_var * LATE_PENALTY_PER_MIN
 
         for i, j, k_id in valid_edges_list:
             dist = _dist_for_constr.get((i, j), 0)
-            obj_expr -= x[i, j, k_id] * dist * 0.01
+            obj_expr -= x[i, j, k_id] * dist * 0.001
 
-        # 充电惩罚 — 使用预分组边
+        # 充电惩罚（微小 tie-breaker）
         for s in station_nodes:
             incoming = edges_by_target.get(s, [])
             station_visits = gp.quicksum(x[i, j, k_id] for i, j, k_id in incoming)
-            obj_expr -= station_visits * 500
-
-        # 迟到惩罚 — 对每个任务-车辆组合的迟到时间进行惩罚
-        for (task_node, k_id), late_var in late_vars.items():
-            obj_expr -= late_var * LATE_PENALTY_PER_MIN
+            obj_expr -= station_visits * 10
 
         model.setObjective(obj_expr, GRB.MAXIMIZE)
 

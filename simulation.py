@@ -74,7 +74,7 @@ _PATH_CACHE = {}
 _PATH_NOT_FOUND = object()
 
 def _cached_shortest_path_length(G, source, target, weight='weight'):
-    key = (source, target)
+    key = (id(G), source, target)
     if key in _PATH_CACHE:
         return _PATH_CACHE[key]
     try:
@@ -86,7 +86,7 @@ def _cached_shortest_path_length(G, source, target, weight='weight'):
         return _PATH_NOT_FOUND
 
 def _cached_shortest_path(G, source, target, weight='weight'):
-    key = ('path', source, target)
+    key = (id(G), 'path', source, target)
     if key in _PATH_CACHE:
         return _PATH_CACHE[key]
     try:
@@ -350,10 +350,9 @@ class Vehicle:
                 return None
 
             task_to_return.status = "COMPLETED"
-            # --- 修复核心：取消强制调用 self.go_to_depot(G)，改为待命状态 ---
-            # 这样车辆会自动扫描计划列表，原地起步前往下一个任务 (多点配送)
             self.status = "IDLE"
-            self.current_task = None 
+            self.current_task = None
+            self.current_payload = 0
             return task_to_return
         return None
 
